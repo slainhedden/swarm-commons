@@ -181,3 +181,19 @@ def test_verification_runs_only_in_locked_down_docker(tmp_path, monkeypatch):
     assert "--network=none" in invocations[0] and "--read-only" in invocations[0] and "--cap-drop=ALL" in invocations[0]
     assert f"type=bind,source={tmp_path},target=/workspace,readonly" in invocations[0]
     assert invocations[1][0:3] == ("docker", "rm", "-f")
+
+
+def test_verification_mounts_linked_worktree_git_dir_read_only(tmp_path, monkeypatch):
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    common = tmp_path / "repo.git"
+    linked = common / "worktrees" / workspace.name
+    linked.mkdir(parents=True)
+    (workspace / ".git").write_text(f"gitdir: {linked}\n")
+
+    def run(command, **kwargs):
+        mounted = f"type=bind,source={common},target={common},readonly" in command
+        return type("Result", (), {"returncode": 0 if mounted else 1})()
+
+    monkeypatch.setattr(verification.subprocess, "run", run)
+    assert verification.verify(workspace, "trusted-image", "git status", git_dir=common)[0]["outcome"] == "passed"

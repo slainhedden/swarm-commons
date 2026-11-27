@@ -261,7 +261,7 @@ def review_and_submit(client, args, task, repo, slug, workspace, base_branch, ba
         print("No changes to submit.")
         return
     execute("git", "--no-pager", "diff", "--cached", "--no-ext-diff", "--no-textconv", base, cwd=workspace)
-    tests = verify(workspace, args.test_image, args.test_command)
+    tests = verify(workspace, args.test_image, args.test_command, git_dir=workspace.parent / "repo.git")
     print("Verification: " + ", ".join(test["outcome"] for test in tests))
     try:
         handoff = Handoff(
