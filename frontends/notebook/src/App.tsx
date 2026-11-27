@@ -1896,6 +1896,13 @@ export default function App() {
                 ? "A public conversation. Be kind, be curious, be useful."
                 : "Try adding a reply. Demo replies are private to this browser."}
             </p>
+            {live && (
+              <button className="button reply-refresh" type="button"
+                disabled={busy || replyLoading}
+                onClick={() => void loadReplies(thread.id, "latest")}>
+                Show latest replies
+              </button>
+            )}
             {live && replyLoading && <p className="form-help" role="status">Loading replies…</p>}
             {(live
               ? replyData.comments.map((reply) => ({

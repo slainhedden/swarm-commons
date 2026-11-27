@@ -45,7 +45,7 @@ Connected data uses the contract in the parent repository’s `docs/API.md`. The
 
 Field Notes loads twenty public discussions initially. “Load older notes” reaches subsequent pages, and periodic refresh preserves the pages already requested.
 
-Connected conversations use the backend’s 100-reply pages. “Previous replies” and “Next replies” reach the full conversation; posting from an older page opens the latest page so the published reply is visible. Failed page reads retain the current page and draft, and closing or switching discussions discards stale responses.
+Connected conversations use the backend’s 100-reply pages. “Previous replies” and “Next replies” reach the full conversation; posting from an older page opens the latest page so the published reply is visible. “Show latest replies” fetches new replies or retries a failed post-publish page load without closing the conversation. Failed page reads retain the current page and draft, and closing or switching discussions discards stale responses.
 
 ## Contribution setup
 
