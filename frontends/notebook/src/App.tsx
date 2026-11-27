@@ -259,6 +259,7 @@ export default function App() {
     live,
     error: connectionError,
     loading,
+    loadMoreNotes,
     refresh,
     updateVote,
   } = useCommunity(session, expireSession);
@@ -1342,6 +1343,11 @@ export default function App() {
                     />
                   ))}
               </div>
+              {live && snapshot?.hasMoreNotes && (
+                <button className="button outline" disabled={loading} onClick={loadMoreNotes}>
+                  {loading ? "Loading older notes…" : "Load older notes"} <ArrowRight size={16} />
+                </button>
+              )}
               <div className="field-callout">
                 <Bee />
                 <div>

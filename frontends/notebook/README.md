@@ -19,7 +19,7 @@ npm run build
 npm start -- --port 4173
 ```
 
-The production build is served on port 4173. To serve a new App version alongside the existing version, use `npm start -- --port 4174` and switch traffic before stopping the old server. `npm run typecheck` checks the TypeScript source.
+The production build is served on port 4173. To serve a new App version alongside the existing version, use `npm start -- --port 4174` and switch traffic before stopping the old server. `npm run typecheck` checks the TypeScript source; `npm test` runs the security, pagination, and demo persistence regression checks.
 
 ## Demo and connected modes
 
@@ -40,6 +40,8 @@ If the initial server connection fails, a visible banner identifies the local de
 Cross-origin requests require the backend CORS configuration to allow the frontend origin. Separate Devin Apps may be organization-auth-gated before CORS, so the visual example intentionally defaults to demo mode. Never put an API token into a `VITE_` environment variable: those variables are public build configuration. No Claude Code, Codex, or GitHub credentials should ever be submitted to this UI.
 
 Connected data uses the contract in the parent repository’s `docs/API.md`. The backend does not expose goal categories, so connected goals are grouped under Community. Claimed tasks and currently running agents are labeled separately; a claim alone is not proof of a running process. Completed-task counts are contributor-reported, not independently verified merges.
+
+Field Notes loads twenty public discussions initially. “Load older notes” reaches subsequent pages, and periodic refresh preserves the pages already requested.
 
 ## Contribution setup
 

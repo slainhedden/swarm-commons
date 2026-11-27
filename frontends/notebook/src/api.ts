@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Agent, Goal, Note } from "./data";
 import { apiRequestUrl } from "./safety";
+import { threadPages } from "./pagination";
 
 const configuredBase = (import.meta.env.VITE_API_BASE || "")
   .trim()
@@ -67,6 +68,7 @@ type Snapshot = {
   goals: Goal[];
   featured: Goal | null;
   notes: Note[];
+  hasMoreNotes: boolean;
   agents: Agent[];
   activity: Activity[];
   stats: { agents_running: number; contributors: number; prs_merged: number };
@@ -207,12 +209,12 @@ export function saveAccountVotes(handle: string, votes: string[]) {
   }
 }
 
-async function fetchCommunity(token?: string) {
+async function fetchCommunity(token: string | undefined, notePages: number) {
   const options = { token };
   return Promise.all([
     request<ApiGoal[]>("/goals", options),
     request<ApiGoal | null>("/goals/featured", options),
-    request<ApiThread[]>("/threads", options),
+    threadPages((page, limit) => request<ApiThread[]>(`/threads?page=${page}&limit=${limit}`, options), notePages),
     request<ApiTask[]>("/tasks", options),
     request<Snapshot["stats"]>("/stats", options),
     request<Activity[]>("/activity?limit=4", options),
@@ -228,6 +230,7 @@ export function useCommunity(
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(Boolean(API_BASE));
+  const [notePages, setNotePages] = useState(1);
   const mounted = useRef(true);
   const activeToken = useRef(token);
   const generation = useRef(0);
@@ -241,7 +244,7 @@ export function useCommunity(
       generation.current === requestId;
     try {
       const [rawGoals, rawFeatured, threads, tasks, stats, activity] =
-        await fetchCommunity(token);
+        await fetchCommunity(token, notePages);
       const goals = rawGoals.map(mapGoal);
       const next: Snapshot = {
         viewer: handle,
@@ -249,7 +252,8 @@ export function useCommunity(
         featured: rawFeatured ? mapGoal(rawFeatured) : null,
         stats,
         activity,
-        notes: threads.map((thread) => ({
+        hasMoreNotes: threads.hasMore,
+        notes: threads.items.map((thread) => ({
           id: String(thread.id),
           name: thread.author,
           initials: thread.author.slice(0, 2).toUpperCase(),
@@ -303,7 +307,7 @@ export function useCommunity(
     } finally {
       if (isCurrent()) setLoading(false);
     }
-  }, [token, handle, onSessionExpired]);
+  }, [token, handle, onSessionExpired, notePages]);
   const updateVote = useCallback(
     (id: string, votes: number, viewerVoted: boolean) => {
       setSnapshot((current) => {
@@ -337,5 +341,8 @@ export function useCommunity(
   }, [refresh]);
   return {
     snapshot, error, loading, refresh, updateVote, live: Boolean(snapshot),
+    loadMoreNotes: () => {
+      if (snapshot?.hasMoreNotes && !loading) setNotePages((count) => count + 1);
+    },
   };
 }
