@@ -39,6 +39,14 @@ import {
 } from "./api";
 
 const REPO = "https://github.com/slainhedden/swarm-commons";
+const emptyGoal = goalFromApi({
+  id: null,
+  title: "Our first mission starts with you.",
+  description:
+    "No public goals have been approved yet. Sign in and propose something useful for the community to build.",
+  status: "open",
+  votes: 0,
+});
 const seedGoals = [
   {
     id: "access-map",
@@ -293,7 +301,7 @@ function App() {
     : demoVotes;
   const setGoals = connected ? setRemoteGoals : setDemoGoals;
   const setProfile = connected ? setRemoteProfile : setDemoProfile;
-  const goal = goals?.[0] || seedGoals[0];
+  const goal = goals?.[0] || (connected ? emptyGoal : seedGoals[0]);
   const visibleGoals = goals.filter(
     (g, i) =>
       (filter === "All goals" ||
@@ -323,7 +331,6 @@ function App() {
             request("/tasks"),
           ]);
         if (disposed) return;
-        if (!allGoals.length) throw new Error("No goals yet");
         const ordered = featured
           ? [featured, ...allGoals.filter((g) => g.id !== featured.id)]
           : allGoals;
@@ -895,12 +902,16 @@ function App() {
                     <div className="mission-top">
                       <span className="pill">
                         <span className="live-dot" />{" "}
-                        {connected && goal.status === "done"
+                        {connected && !goal.id
+                          ? "READY FOR IDEAS"
+                          : connected && goal.status === "done"
                           ? "COMPLETE"
                           : "IN BLOOM"}
                       </span>
                       <span className="mission-id">
-                        {connected
+                        {connected && !goal.id
+                          ? "A NEW COMMUNITY"
+                          : connected
                           ? `MISSION ${goal.id} / COMMUNITY CHOSEN`
                           : "MISSION 012 / COMMUNITY CHOSEN"}
                       </span>
@@ -913,13 +924,22 @@ function App() {
                         <h3>{goal.title}</h3>
                         <p>{goal.description}</p>
                         <div className="mission-links">
-                          <button
-                            className="button dark small"
-                            onClick={() => setModal("watch")}
-                          >
-                            <Radio size={15} /> Watch the swarm{" "}
-                            <ArrowUpRight size={15} />
-                          </button>
+                          {connected && !goal.id ? (
+                            <button
+                              className="button dark small"
+                              onClick={() => setModal(profile ? "propose" : "login")}
+                            >
+                              <Plus size={15} /> Propose the first goal
+                            </button>
+                          ) : (
+                            <button
+                              className="button dark small"
+                              onClick={() => setModal("watch")}
+                            >
+                              <Radio size={15} /> Watch the swarm{" "}
+                              <ArrowUpRight size={15} />
+                            </button>
+                          )}
                           <a
                             className="text-button"
                             href={repository}
@@ -933,7 +953,7 @@ function App() {
                       </div>
                       <MapArt />
                     </div>
-                    <div className="mission-progress">
+                    {goal.id && <div className="mission-progress">
                       <div>
                         <span>
                           <strong>{goal.progress}%</strong> of the way there
@@ -969,7 +989,7 @@ function App() {
                           {goal.votes.toLocaleString()} community votes
                         </button>
                       </div>
-                    </div>
+                    </div>}
                   </article>
                   <aside className="activity-card">
                     <div className="activity-heading">
