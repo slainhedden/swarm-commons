@@ -4,6 +4,7 @@ import os
 import subprocess
 from contextlib import nullcontext
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from support import approve, live_server, test_app
@@ -43,7 +44,26 @@ def setup_browser(browser):
     return client, goal, task
 
 
+def test_run_rejects_private_repository_before_claim_or_clone(monkeypatch, capsys):
+    class PrivateTask:
+        def get(self, path):
+            assert path == "tasks/1"
+            return {"repo_url": "https://github.com/example/private"}
+
+    monkeypatch.setattr(cli.Client, "from_config", lambda: nullcontext(PrivateTask()))
+
+    def public_lookup(url, **options):
+        assert url == "https://api.github.com/repos/example/private"
+        assert options["trust_env"] is False and "auth" not in options
+        return httpx.Response(404)
+
+    monkeypatch.setattr(cli.httpx, "get", public_lookup)
+    assert cli.main(["run", "1", "--agent", "fake"]) == 1
+    assert "public GitHub repository" in capsys.readouterr().err
+
+
 def test_fake_run_against_local_bare_repo(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli.httpx, "get", lambda *args, **kwargs: httpx.Response(200, json={"private": False}))
     remote = tmp_path / "remote.git"
     git("init", "--bare", "--initial-branch=main", str(remote), cwd=tmp_path)
     source = tmp_path / "source"

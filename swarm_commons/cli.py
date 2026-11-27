@@ -12,6 +12,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+import httpx
 from pydantic import ValidationError
 
 from .client import Client, SwarmError, save_config, server_url
@@ -204,6 +205,18 @@ def report_run(client, task_id, agent):
         report("finished", "Local agent finished; changes await contributor review.")
 
 
+def require_public_repo(slug):
+    try:
+        response = httpx.get(f"https://api.github.com/repos/{slug}", trust_env=False, timeout=5)
+        if response.status_code == 200:
+            metadata = response.json()
+            if isinstance(metadata, dict) and metadata.get("private") is False:
+                return
+    except (httpx.HTTPError, ValueError):
+        pass
+    raise SwarmError("Could not verify the target as a public GitHub repository.")
+
+
 def run_task(client, args):
     task = client.get(f"tasks/{args.id}")
     repo = task["repo_url"]
@@ -212,6 +225,7 @@ def run_task(client, args):
     slug = repo.removeprefix("https://github.com/")
     if slug.rsplit("/", 1)[1] in {".", ".."}:
         raise SwarmError("Task does not target a supported GitHub repository.")
+    require_public_repo(slug)
     if bool(args.test_image) != bool(args.test_command):
         raise SwarmError("Set both --test-image and --test-command to verify in Docker.")
     launcher = None
