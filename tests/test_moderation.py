@@ -3,6 +3,8 @@ from fastapi.testclient import TestClient
 from support import ADMIN, approve, test_app
 from test_api import PREFIX, contributor, password_account, proposal
 
+from swarm_commons.store import Connection
+
 
 GOAL = {"title": "<b>Docs</b><script>alert(1)</script>", "description": "Public", "repo_url": "https://github.com/example/docs"}
 TASK = {"title": "Write docs", "description": "Review setup", "criteria": "Check references"}
@@ -14,13 +16,16 @@ def test_proposal_approval_note_reports_and_ban(tmp_path):
         worker = contributor(browser, "worker")
         created = browser.post(f"{PREFIX}/goals", json=GOAL, headers=owner).json()
         goal = created["id"]
-        assert created["visibility"] == "pending" and created["title"] == "Docs"
+        assert created["visibility"] == "pending" and created["title"] == GOAL["title"]
         assert browser.get(f"{PREFIX}/goals").json() == []
         assert browser.get(f"{PREFIX}/goals/{goal}").status_code == 404
         assert browser.get(f"{PREFIX}/goals/{goal}", headers=owner).status_code == 200
         decision = {"action": "approve", "reason": "Reviewed"}
         assert browser.post(f"{PREFIX}/moderation/goals/{goal}", json=decision, headers=owner).status_code == 403
         approve(browser, "goals", goal)
+        rendered = browser.get(f"/goals/{goal}").text
+        assert "&lt;b&gt;Docs&lt;/b&gt;&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
+        assert "<script>alert(1)</script>" not in rendered
         task = browser.post(f"{PREFIX}/goals/{goal}/tasks", json=TASK, headers=worker).json()["id"]
         assert browser.get(f"{PREFIX}/tasks?available=true").json() == []
         assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=worker).status_code == 409
@@ -39,6 +44,146 @@ def test_proposal_approval_note_reports_and_ban(tmp_path):
         }, headers=ADMIN).status_code == 200
         assert browser.get(f"{PREFIX}/me", headers=worker).status_code == 401
         assert browser.get(f"{PREFIX}/tasks/{task}").status_code == 404
+
+
+def test_code_and_markup_are_preserved_as_text(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        member = contributor(browser, "member")
+        body = '#include <stdio.h>\n<img src=x onerror="alert(1)">'
+        thread = browser.post(f"{PREFIX}/threads", headers=member, json={"title": "C examples", "body": body}).json()
+        assert browser.get(f"{PREFIX}/threads/{thread['id']}").json()["body"] == body
+        rendered = browser.get(f"/forum/{thread['id']}").text
+        assert "#include &lt;stdio.h&gt;" in rendered
+        assert "&lt;img src=x onerror=" in rendered
+        assert "<img src=x" not in rendered
+
+
+def test_reports_do_not_reveal_children_of_hidden_parents(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        outsider = contributor(browser, "outsider")
+        goal, task = proposal(browser, owner)
+        thread = browser.post(f"{PREFIX}/threads", headers=owner, json={
+            "goal_id": goal, "title": "Topic", "body": "Discussion",
+        }).json()["id"]
+        reply = browser.post(f"{PREFIX}/threads/{thread}/comments", headers=owner, json={"body": "Reply"}).json()["id"]
+        note = browser.post(f"{PREFIX}/goals/{goal}/notes", headers=owner, json={"body": "Note"}).json()["id"]
+        child = browser.post(f"{PREFIX}/tasks/{task}/subtasks", headers=owner, json={"tasks": [TASK]}).json()[0]["id"]
+        approve(browser, "tasks", child)
+        assert f'id="task-{child}"' in browser.get(f"/goals/{goal}").text
+        hide = {"action": "hide", "reason": "Removed"}
+        report = {"reason": "Report"}
+        for kind, parent, children in (
+            ("tasks", task, [("tasks", child)]),
+            ("threads", thread, [("comments", reply)]),
+            ("goals", goal, [("tasks", task), ("threads", thread), ("notes", note), ("comments", reply)]),
+        ):
+            assert browser.post(f"{PREFIX}/moderation/{kind}/{parent}", headers=ADMIN, json=hide).status_code == 200
+            for child_kind, child_id in children:
+                assert browser.post(f"{PREFIX}/{child_kind}/{child_id}/report", headers=outsider,
+                                    json=report).status_code == 404
+            if kind == "tasks":
+                assert f'id="task-{child}"' not in browser.get(f"/goals/{goal}").text
+                assert browser.get(f"{PREFIX}/tasks/{child}").status_code == 404
+                assert browser.post(f"{PREFIX}/tasks/{child}/claim", headers=outsider).status_code == 404
+
+
+def test_goal_owner_can_approve_pending_task_before_goal_is_public(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        stranger = contributor(browser, "stranger")
+        goal = browser.post(f"{PREFIX}/goals", headers=owner, json=GOAL).json()["id"]
+        task = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=owner, json=TASK).json()["id"]
+        route = f"{PREFIX}/moderation/tasks/{task}"
+        decision = {"action": "approve", "reason": "Reviewed"}
+        assert browser.post(route, headers=stranger, json=decision).status_code == 404
+        assert browser.post(route, headers=owner, json=decision).status_code == 200
+        assert browser.get(f"{PREFIX}/tasks/{task}").status_code == 404
+
+
+def test_bulk_moderation_resets_task_rows_before_deleting_path_leases(tmp_path, monkeypatch):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        worker = contributor(browser, "worker")
+        goal, first = proposal(browser, owner)
+        second = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=owner, json=TASK).json()["id"]
+        approve(browser, "tasks", second)
+        for task in (first, second):
+            endpoint = f"{PREFIX}/tasks/{task}"
+            assert browser.post(f"{endpoint}/claim", headers=worker).status_code == 200
+            assert browser.post(f"{endpoint}/path-leases", headers=worker, json={"path": f"file-{task}"}).status_code == 201
+        calls = []
+        execute = Connection.execute
+
+        def track(db, sql, params=()):
+            statement = sql.strip()
+            if statement.startswith("UPDATE tasks SET status = 'open'"):
+                calls.append(("task", params[0]))
+            if statement.startswith("DELETE FROM path_leases"):
+                calls.append(("lease", params[0]))
+            return execute(db, sql, params)
+
+        monkeypatch.setattr(Connection, "execute", track)
+        assert browser.post(f"{PREFIX}/moderation/goals/{goal}", headers=ADMIN,
+                            json={"action": "hide", "reason": "Removed"}).status_code == 200
+        assert calls == [("task", first), ("task", second), ("lease", first), ("lease", second)]
+
+
+def test_hidden_subtask_heartbeat_does_not_hold_claim_capacity(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False, claim_cap=1)) as browser:
+        owner = contributor(browser, "owner")
+        worker = contributor(browser, "worker")
+        goal, parent = proposal(browser, owner)
+        task = browser.post(f"{PREFIX}/tasks/{parent}/subtasks", headers=owner, json={"tasks": [TASK]}).json()[0]["id"]
+        other = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=owner, json=TASK).json()["id"]
+        approve(browser, "tasks", task)
+        approve(browser, "tasks", other)
+        assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=worker).status_code == 200
+        assert browser.post(f"{PREFIX}/tasks/{other}/claim", headers=worker).status_code == 409
+        path = f"{PREFIX}/moderation/tasks/{parent}"
+        assert browser.post(path, headers=ADMIN, json={"action": "hide", "reason": "Removed"}).status_code == 200
+        assert browser.post(f"{PREFIX}/tasks/{task}/heartbeat", headers=worker).status_code != 200
+        assert browser.post(f"{PREFIX}/tasks/{other}/claim", headers=worker).status_code == 200
+        assert browser.post(path, headers=ADMIN, json={"action": "approve", "reason": "Restored"}).status_code == 200
+        restored = browser.get(f"{PREFIX}/tasks/{task}").json()
+        assert restored["status"] == "open" and restored["lease_until"] is None
+
+
+def test_ban_removes_activity_from_a_different_authors_task(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        worker = contributor(browser, "worker")
+        _, task = proposal(browser, owner)
+        assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=worker).status_code == 200
+        event = browser.post(f"{PREFIX}/tasks/{task}/events", headers=worker,
+                             json={"kind": "progress", "summary": "Public run message"}).json()
+        assert event in browser.get(f"{PREFIX}/activity").json()
+        assert browser.post(f"{PREFIX}/moderation/contributors/worker/ban", headers=ADMIN,
+                            json={"reason": "Suspended"}).status_code == 200
+        assert browser.get(f"{PREFIX}/tasks/{task}").status_code == 200
+        events = browser.get(f"{PREFIX}/activity").json()
+        assert all(item["actor"] != "worker" for item in events)
+        assert any(item["kind"] == "moderated" for item in events)
+
+
+def test_claim_does_not_disclose_hidden_task_or_hidden_goal(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        outsider = contributor(browser, "outsider")
+        goal, task = proposal(browser, owner)
+        approved_task = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=owner, json=TASK).json()["id"]
+        approve(browser, "tasks", approved_task)
+        hide = {"action": "hide", "reason": "Removed"}
+        missing = browser.post(f"{PREFIX}/tasks/99999/claim", headers=outsider)
+        for kind, item, target in (("tasks", task, task), ("goals", goal, approved_task)):
+            assert browser.post(f"{PREFIX}/moderation/{kind}/{item}", headers=ADMIN, json=hide).status_code == 200
+            response = browser.post(f"{PREFIX}/tasks/{target}/claim", headers=outsider)
+            assert response.status_code == missing.status_code == 404
+            assert response.json() == missing.json()
+        for target in (goal, 99999):
+            response = browser.post(f"{PREFIX}/moderation/goals/{target}", headers=outsider, json=hide)
+            assert response.status_code == 404
+            assert response.json() == {"detail": "Content not found."}
 
 
 def test_limits_vote_age_locking_and_pagination(tmp_path):

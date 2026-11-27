@@ -1,5 +1,4 @@
 import os
-from html.parser import HTMLParser
 from typing import Annotated, Literal
 
 import httpx
@@ -28,40 +27,6 @@ class RoleInput(BaseModel):
 
 def admin_handles():
     return {item.strip() for item in os.environ.get("SWARM_ADMINS", "").split(",") if item.strip()}
-
-
-class PlainText(HTMLParser):
-    def __init__(self):
-        super().__init__(convert_charrefs=False)
-        self.parts = []
-        self.ignored = None
-
-    def handle_starttag(self, tag, attrs):
-        if tag in {"script", "style"} and self.ignored is None:
-            self.ignored = tag
-
-    def handle_endtag(self, tag):
-        if tag == self.ignored:
-            self.ignored = None
-
-    def handle_data(self, data):
-        if self.ignored is None:
-            self.parts.append(data)
-
-    def handle_entityref(self, name):
-        self.handle_data(f"&{name};")
-
-    def handle_charref(self, name):
-        self.handle_data(f"&#{name};")
-
-
-def plain_text(value):
-    if not isinstance(value, str) or "<" not in value:
-        return value
-    parser = PlainText()
-    parser.feed(value)
-    parser.close()
-    return "".join(parser.parts)
 
 
 def check_github_pr(pr_url, claimed_at):

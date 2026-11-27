@@ -4,6 +4,7 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
 from .client import Client, SwarmError
+from .orchestration import Handoff, TestResult
 
 
 class ProposedTask(BaseModel):
@@ -85,11 +86,12 @@ def create_mcp(client_factory=Client.from_config, *, task_id=None):
             return client.post(f"tasks/{parent_id}/subtasks", tasks=[task.model_dump() for task in tasks])
 
     @mcp.tool()
-    def submit_result(id: int, pr_url: str, summary: str) -> dict:
-        """Report a public PR already approved by the contributor."""
+    def submit_result(id: int, pr_url: str, summary: str, tests: list[TestResult] | None = None) -> dict:
+        """Report a public PR already approved by the contributor, with any test results."""
         if task_id is not None:
             raise SwarmError("Results from swarm run require the contributor's final CLI confirmation.")
         with client_factory() as client:
-            return client.post(f"tasks/{id}/submit", pr_url=pr_url, summary=summary)
+            handoff = Handoff(tests=tests).model_dump() if tests is not None else None
+            return client.post(f"tasks/{id}/submit", pr_url=pr_url, summary=summary, handoff=handoff)
 
     return mcp
