@@ -37,6 +37,7 @@ import {
   updateGoalVote,
   goalVoteIds,
   requestThreadPages,
+  requestThreadDetail,
 } from "./api";
 
 const REPO = "https://github.com/slainhedden/swarm-commons";
@@ -497,17 +498,24 @@ function App() {
     setTab("Overview");
     setModal("watch");
   }
-  async function openThread(thread) {
+  async function loadThread(thread, page = 1) {
+    const full = threadFromApi(await requestThreadDetail(thread.id, page));
+    setRemoteThreads((ts) => ts.map((t) => (t.id === full.id ? full : t)));
+    setSelectedThread(full);
+  }
+  async function openThread(thread, page = 1) {
     if (!connected) {
       setSelectedThread(thread);
       return;
     }
+    if (busy) return;
+    setBusy(true);
     try {
-      const full = threadFromApi(await request(`/threads/${thread.id}`));
-      setRemoteThreads((ts) => ts.map((t) => (t.id === full.id ? full : t)));
-      setSelectedThread(full);
+      await loadThread(thread, page);
     } catch (e) {
       reportError(e);
+    } finally {
+      setBusy(false);
     }
   }
   async function authenticate(e) {
@@ -669,12 +677,18 @@ function App() {
         setRemoteThreads((ts) =>
           ts.map((t) =>
             t.id === selectedThread.id
-              ? { ...t, replies: [...t.replies, reply] }
+              ? { ...t, replies: [...t.replies, reply], replyCount: t.replyCount + 1 }
               : t,
           ),
         );
         form.reset();
-        notify("Your reply is part of the conversation.");
+        try {
+          await loadThread(selectedThread, "latest");
+          notify("Your reply is part of the conversation.");
+        } catch (e) {
+          reportError(e);
+          notify("Your reply was posted. Reopen the conversation to load its page.");
+        }
       } catch (e) {
         reportError(e);
       } finally {
@@ -1548,6 +1562,26 @@ function App() {
               </div>
             ))}
           </div>
+          {connected &&
+            (selectedThread.comments_page > 1 || selectedThread.comments_next_page) && (
+              <nav className="reply-pages" aria-label="Reply pages">
+                <button
+                  className="button small"
+                  disabled={busy || selectedThread.comments_page <= 1}
+                  onClick={() => openThread(selectedThread, selectedThread.comments_page - 1)}
+                >
+                  Earlier replies
+                </button>
+                <span>Page {selectedThread.comments_page}</span>
+                <button
+                  className="button small"
+                  disabled={busy || !selectedThread.comments_next_page}
+                  onClick={() => openThread(selectedThread, selectedThread.comments_next_page)}
+                >
+                  Later replies
+                </button>
+              </nav>
+            )}
           <form onSubmit={replyToThread}>
             <label className="form-label">
               Add your perspective

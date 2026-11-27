@@ -25,6 +25,7 @@ The production preview server listens on `0.0.0.0:4173`. For static hosting, dep
 - If the initial API connection fails, the app clearly falls back to its browser-local demo. Remote writes never silently become demo writes. The API contract is the repository's `docs/API.md`.
 - Connected goal proposals receive a pending-moderation receipt and are not inserted into the public list until approved. New password accounts wait ten minutes before voting. Vote removal uses `DELETE`; the API's `viewer_voted` field is authoritative, with per-account local tracking only for older API versions without that field. Demo votes never affect connected accounts.
 - Connected counts distinguish active claims from heartbeat-backed agents running. PR completions are self-reported, and submitted work is labeled unverified until independent review; neither is proof of upstream CI or merge.
+- Connected conversations have earlier/later reply-page controls beyond the API's 100-reply page size. Posting a reply opens the latest page using a fresh server count, so crossing a page boundary does not hide the new reply.
 
 Run the API adapter checks with `node --test src/api.test.js`.
 

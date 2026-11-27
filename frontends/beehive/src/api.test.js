@@ -7,6 +7,8 @@ import {
   updateGoalVote,
   saveToken,
   requestThreadPages,
+  requestThreadDetail,
+  threadFromApi,
 } from "./api.js";
 
 test("server vote state overrides stale local flags, with account-specific older-API fallback", () => {
@@ -35,6 +37,39 @@ test("older discussion pages stay reachable and overlapping page boundaries do n
   assert.equal(loaded.items.length, 21);
   assert.equal(loaded.items.at(-1).id, 21);
   assert.equal(loaded.hasMore, false);
+});
+
+test("reply pages expose replies after 100 and posting selects the fresh last page", async (t) => {
+  let count = 200;
+  const calls = [];
+  t.mock.method(globalThis, "fetch", async (url) => {
+    const parsed = new URL(url, "http://localhost");
+    assert.equal(parsed.pathname, "/threads/7");
+    const page = Number(parsed.searchParams.get("page"));
+    calls.push(page);
+    return Response.json({
+      id: 7, author: "river", created_at: 0, comment_count: count,
+      comments: Array.from({ length: Math.min(100, count - (page - 1) * 100) }, (_, index) => ({
+        id: (page - 1) * 100 + index + 1,
+        author: "river", body: "A public reply",
+      })),
+      comments_page: page,
+      comments_next_page: page * 100 < count ? page + 1 : null,
+    });
+  });
+  const second = threadFromApi(await requestThreadDetail(7, 2));
+  assert.equal(second.replies[0].id, 101);
+  assert.equal(second.comments_page, 2);
+  assert.equal(second.comments_next_page, null);
+  count += 1; // A new reply crosses a page boundary after the thread was opened.
+  const latest = threadFromApi(await requestThreadDetail(7, "latest"));
+  assert.equal(latest.comments_page, 3);
+  assert.deepEqual(latest.replies.map((reply) => reply.id), [201]);
+  assert.deepEqual(calls, [2, 1, 3]);
+  const first = await requestThreadDetail(7);
+  assert.equal(first.comments_next_page, 2);
+  count = 0;
+  assert.deepEqual((await requestThreadDetail(7, "latest")).comments, []);
 });
 
 test("vote and undo use the v2 methods, bearer auth and canonical response", async (t) => {

@@ -57,6 +57,14 @@ export async function requestThreadPages(count = 1) {
     hasMore: pages.at(-1).length === 20,
   };
 }
+export async function requestThreadDetail(id, page = 1) {
+  if (page !== "latest") return request(`/threads/${id}?page=${page}`);
+  // The API serves 100 replies per page. Re-read its count after posting,
+  // rather than trusting the count from when the conversation was opened.
+  const first = await request(`/threads/${id}?page=1`);
+  const lastPage = Math.max(1, Math.ceil(first.comment_count / 100));
+  return lastPage > 1 ? request(`/threads/${id}?page=${lastPage}`) : first;
+}
 export function goalVoteIds(goals, handle, accountVotes) {
   if (!handle) return [];
   const fallback = accountVotes[`${API_BASE}:${handle}`] || [];
