@@ -868,9 +868,13 @@ export default function PlatformBrowser({ onDemo, notify }) {
                           {session && session.handle !== t.claimant && (
                             <button
                               className="retro-button"
-                              disabled={busy}
+                              disabled={busy || !t.submission_id}
                               onClick={() =>
-                                setForm({ kind: "review", taskId: t.id })
+                                setForm({
+                                  kind: "review",
+                                  taskId: t.id,
+                                  submissionId: t.submission_id,
+                                })
                               }
                             >
                               Review submission
@@ -991,7 +995,11 @@ export default function PlatformBrowser({ onDemo, notify }) {
                         onSubmit={({ approved, ...data }) =>
                           finishForm(
                             `/tasks/${t.id}/reviews`,
-                            { ...data, approved: approved === "true" },
+                            {
+                              ...data,
+                              submission_id: form.submissionId,
+                              approved: approved === "true",
+                            },
                             {
                               message:
                                 "Contributor review saved. This is an attestation, not verified upstream CI.",
