@@ -15,7 +15,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from .client import Client, SwarmError, save_config, server_url
-from .github import GITHUB_REPO, public_repo_slug, valid_repo_slug
+from .github import GITHUB_REPO, GitHubMetadataUnavailable, public_repo_slug, publicly_cloneable, valid_repo_slug
 from .guards import claude_guard, commit_guard, install_commit_guard, staged_paths, verify_paths
 from .local import load_policy, safe_env, state_root, usage_reservation
 from .orchestration import Handoff
@@ -209,8 +209,13 @@ def report_run(client, task_id, agent):
         report("finished", "Local agent finished; changes await contributor review.")
 
 
-def require_public_repo(slug):
-    canonical = public_repo_slug(slug)
+def require_public_repo(slug, *, fake=False):
+    try:
+        canonical = public_repo_slug(slug)
+    except GitHubMetadataUnavailable:
+        if fake and publicly_cloneable(slug):
+            return None
+        raise SwarmError("GitHub denied or rate-limited the public repository lookup. Try again later.") from None
     if canonical is None:
         raise SwarmError("Could not verify the target as a public GitHub repository.")
     return canonical
@@ -222,8 +227,8 @@ def run_task(client, args):
     slug = repo.removeprefix(GITHUB_REPO)
     if slug == repo or not valid_repo_slug(slug):
         raise SwarmError("Task does not target a supported GitHub repository.")
-    slug = require_public_repo(slug)
-    repo = GITHUB_REPO + slug
+    canonical_slug = require_public_repo(slug, fake=args.agent == "fake")
+    repo = GITHUB_REPO + (canonical_slug or slug)
     if bool(args.test_image) != bool(args.test_command):
         raise SwarmError("Set both --test-image and --test-command to verify in Docker.")
     launcher = None
@@ -258,7 +263,7 @@ def run_task(client, args):
             print(f"Local worktree: {workspace}", flush=True)
             with report_run(client, args.id, args.agent):
                 usage = invoke_agent(args.agent, prompt, workspace, args.id, args.budget_minutes, policy, launcher)
-        submitted = review_and_submit(client, args, task, repo, slug, workspace, base_branch, base, branch, usage)
+        submitted = review_and_submit(client, args, task, canonical_slug, workspace, base_branch, base, branch, usage)
     finally:
         if claimed and not submitted:
             try:
@@ -268,7 +273,7 @@ def run_task(client, args):
                 print(f"swarm: could not release task #{args.id}: {exc}", file=sys.stderr)
 
 
-def review_and_submit(client, args, task, repo, slug, workspace, base_branch, base, branch, usage):
+def review_and_submit(client, args, task, canonical_slug, workspace, base_branch, base, branch, usage):
     execute("git", "-c", "core.hooksPath=/dev/null", "add", "-A", cwd=workspace)
     paths = staged_paths(workspace, base)
     if not paths:
@@ -287,13 +292,19 @@ def review_and_submit(client, args, task, repo, slug, workspace, base_branch, ba
     if not confirm("After reviewing the diff, publish this change as a GitHub PR?"):
         print(f"Not published. Changes remain in {workspace}.")
         return
+    if canonical_slug is None:
+        try:
+            canonical_slug = require_public_repo(task["repo_url"].removeprefix(GITHUB_REPO))
+        except SwarmError as exc:
+            raise SwarmError(f"Cannot publish without confirming the current repository name. {exc} "
+                             f"Changes remain in {workspace}.") from None
     summary = input("Public contribution summary: ").strip()
     if not summary or len(summary) > 5000:
         raise SwarmError("Enter a contribution summary of 1–5000 characters.")
     verify_paths(args.id, paths)
     execute("git", "commit", "--allow-empty", "-m",
             f"Swarm task #{args.id}: {task['title']}", cwd=workspace)
-    pr = publish(workspace, repo, slug, branch, base_branch, task, summary)
+    pr = publish(workspace, GITHUB_REPO + canonical_slug, canonical_slug, branch, base_branch, task, summary)
     print(f"Pull request: {pr}")
     handoff.diff_url = f"{pr}/files"
     client.post(f"tasks/{args.id}/submit", pr_url=pr, summary=summary, handoff=handoff.model_dump())

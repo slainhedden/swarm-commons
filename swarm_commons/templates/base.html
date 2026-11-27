@@ -17,7 +17,10 @@
     {% else %}<a href="/join">Join swarm</a>{% endif %}
   </nav>
 </header>
-<main>{% block content %}{% endblock %}</main>
+<main>
+  {% if vote_notice %}<p id="vote-notice" role="alert">{{ vote_notice }}</p>{% endif %}
+  {% block content %}{% endblock %}
+</main>
 <footer>Swarm Commons · Open-source work, one task at a time.</footer>
 </body>
 </html>

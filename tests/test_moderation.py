@@ -217,6 +217,30 @@ def test_limits_vote_age_locking_and_pagination(tmp_path):
         assert browser.post(f"{PREFIX}/goals", json=GOAL, headers=voter).status_code == 429
 
 
+def test_new_web_voter_returns_to_goal_with_waiting_message(tmp_path):
+    clock = [1000]
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False, clock=lambda: clock[0], vote_age=600)) as browser:
+        owner = contributor(browser, "owner")
+        goal, _ = proposal(browser, owner)
+        assert browser.post("/join", data={
+            "username": "voter", "password": "a test password", "next": f"/goals/{goal}",
+        }, follow_redirects=False).status_code == 303
+        action = f"/vote/goals/{goal}"
+        response = browser.post(action, follow_redirects=False)
+        assert response.status_code == 303
+        page = browser.get(response.headers["location"])
+        assert page.url.path == f"/goals/{goal}"
+        assert '<p id="vote-notice" role="alert">' in page.text
+        assert "new-account waiting period" in page.text
+        api = browser.post(f"{PREFIX}/goals/{goal}/vote")
+        assert api.status_code == 403
+        assert api.json() == {"detail": "Voting requires a password account past its new-account waiting period."}
+        clock[0] += 600
+        response = browser.post(action)
+        assert "vote-notice" not in response.text
+        assert browser.get(f"{PREFIX}/goals/{goal}").json()["votes"] == 1
+
+
 @pytest.mark.parametrize("trust_proxy", (False, True))
 def test_railway_rate_limits_use_edge_ip_only_when_configured(tmp_path, monkeypatch, trust_proxy):
     monkeypatch.setenv("SWARM_TRUST_RAILWAY_CLIENT_IP", "1" if trust_proxy else "0")

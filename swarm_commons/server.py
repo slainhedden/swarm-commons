@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 from sqlalchemy.exc import IntegrityError
 
 from .accounts import password_hash, token_hash, verify_password
-from .github import GITHUB_REPO, REPO_SLUG, public_repo_slug, valid_repo_slug
+from .github import GITHUB_REPO, REPO_SLUG, GitHubMetadataUnavailable, public_repo_slug, valid_repo_slug
 from .moderation import (
     KINDS, RESERVED, Kind, LimitWriteBody, ModerationInput, ReportInput, RoleInput, admin_handles, check_github_pr,
 )
@@ -42,6 +42,13 @@ HANDLE = r"^[a-z0-9][a-z0-9_-]{1,38}$"
 PR = re.compile(rf"https://github\.com/({REPO_SLUG})/pull/[1-9][0-9]*", re.IGNORECASE)
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=140)]
 Body = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=5000)]
+VOTE_WAIT_MESSAGE = "Voting requires a password account past its new-account waiting period."
+
+
+class VoteNotEligible(HTTPException):
+    def __init__(self, item):
+        super().__init__(403, VOTE_WAIT_MESSAGE)
+        self.item = item
 
 
 class Signup(BaseModel):
@@ -502,23 +509,16 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
 
     def vote(kind, item_id, handle, *, remove=False):
         if kind == "goals":
-            goal(item_id)
-            column, table = "goal_id", "goal_votes"
-            get_item = goal
+            column, table, get_item = "goal_id", "goal_votes", goal
         elif kind == "tasks":
-            task(item_id)
-            column, table = "task_id", "task_votes"
-            get_item = task
+            column, table, get_item = "task_id", "task_votes", task
         elif kind == "threads":
-            thread(item_id)
-            column, table = "thread_id", "thread_votes"
-            get_item = thread
+            column, table, get_item = "thread_id", "thread_votes", thread
         elif kind == "comments":
-            comment(item_id)
-            column, table = "comment_id", "comment_votes"
-            get_item = comment
+            column, table, get_item = "comment_id", "comment_votes", comment
         else:
             raise HTTPException(404, "Unknown vote target.")
+        item = get_item(item_id)
         with connect(engine, write=True) as db:
             if remove:
                 db.execute(f"DELETE FROM {table} WHERE {column} = ? AND handle = ?", (item_id, handle))
@@ -529,7 +529,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 if not account["password_hash"] or (
                     int(clock()) - account["created_at"] < vote_age and account["role"] == "contributor"
                 ):
-                    raise HTTPException(403, "Voting requires a password account past its new-account waiting period.")
+                    raise VoteNotEligible(item)
                 db.execute(f"INSERT INTO {table} VALUES (?, ?) ON CONFLICT DO NOTHING", (item_id, handle))
         item = get_item(item_id)
         item["viewer_voted"] = not remove
@@ -596,8 +596,13 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         if not submitted_repo:
             raise HTTPException(422, "Use a GitHub pull request URL on the goal repository.")
         pr_slug = submitted_repo[1].lower()
-        if pr_slug != goal_slug.lower() and pr_slug != (public_repo_slug(goal_slug) or "").lower():
-            raise HTTPException(422, "Use a GitHub pull request URL on the goal repository.")
+        if pr_slug != goal_slug.lower():
+            try:
+                canonical = public_repo_slug(goal_slug)
+            except GitHubMetadataUnavailable:
+                canonical = None
+            if pr_slug != (canonical or "").lower():
+                raise HTTPException(422, "Use a GitHub pull request URL on the goal repository.")
         check = pr_checker(data.pr_url, item["claimed_at"])
         if check == "invalid":
             raise HTTPException(422, "Use an open PR created after this claim.")
@@ -1274,9 +1279,11 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
 
     def page(request, template, *, status_code=200, **context):
         handle = viewer(request, web=True)
+        vote_notice = VOTE_WAIT_MESSAGE if handle and request.query_params.get("vote_wait") == "1" else None
         return templates.TemplateResponse(
             request=request, name=template,
-            context={"viewer": handle, "my_votes": vote_state(handle, "goals", "tasks", "threads", "comments"), **context},
+            context={"viewer": handle, "vote_notice": vote_notice,
+                     "my_votes": vote_state(handle, "goals", "tasks", "threads", "comments"), **context},
             status_code=status_code,
         )
 
@@ -1399,14 +1406,23 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     @app.post("/vote/{kind}/{item_id}")
     def web_vote(kind: str, item_id: int, request: Request, remove: bool = False):
         web_origin(request)
-        item = vote(kind, item_id, contributor(request, web=True), remove=remove)
+        handle = contributor(request, web=True)
+        try:
+            item = vote(kind, item_id, handle, remove=remove)
+        except VoteNotEligible as exc:
+            location = urlsplit(vote_location(kind, item_id, exc.item))
+            query = f"{location.query}&vote_wait=1" if location.query else "vote_wait=1"
+            return redirect(location._replace(query=query, fragment="vote-notice").geturl())
+        return redirect(vote_location(kind, item_id, item))
+
+    def vote_location(kind, item_id, item):
         if kind == "threads":
-            return redirect(f"/forum/{item_id}")
+            return f"/forum/{item_id}"
         if kind == "comments":
-            return redirect(comment_location(item))
+            return comment_location(item)
         if kind == "tasks":
-            return redirect(f"/goals/{item['goal_id']}#task-{item_id}")
-        return redirect(f"/goals/{item_id}")
+            return f"/goals/{item['goal_id']}#task-{item_id}"
+        return f"/goals/{item_id}"
 
     @app.post("/goals/{goal_id}/notes")
     async def web_note(goal_id: int, request: Request):
