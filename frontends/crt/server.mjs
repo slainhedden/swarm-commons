@@ -2,6 +2,7 @@ import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { upstreamHeaders } from "./proxy.mjs";
 const root = path.resolve(fileURLToPath(new URL("./dist/", import.meta.url)));
 // Optional trusted backend, configured by the operator (never by the browser).
 // Streaming proxy keeps HttpOnly cookies and SSE on the site's own origin.
@@ -36,7 +37,11 @@ http
           port: apiUpstream.port || 80,
           path: req.url,
           method: req.method,
-          headers: { ...req.headers, host: apiUpstream.host },
+          headers: upstreamHeaders(
+            req,
+            apiUpstream.host,
+            process.env.SWARM_TRUST_RAILWAY_CLIENT_IP === "1",
+          ),
         },
         (response) => {
           res.writeHead(response.statusCode, {

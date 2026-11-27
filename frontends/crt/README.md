@@ -51,6 +51,8 @@ API_UPSTREAM=http://127.0.0.1:8000 PORT=4173 npm start
 
 This example is for isolated integration testing or a future deployment against the **same shared backend**, not a per-style backend or database. The Node server proxies only `/api/v1` to the fixed operator-configured internal backend, streaming SSE and forwarding cookies and errors. Configure backend `SWARM_PUBLIC_ORIGIN` and CORS with the frontend origin; CSRF checks remain enabled. `API_UPSTREAM` is server-only and never starts a backend. Cross-site SameSite cookie restrictions require a same-origin proxy or an appropriate shared-auth design. Use HTTPS outside localhost.
 
+The proxy overwrites `X-Real-IP` and `X-Forwarded-For` with the socket client's IP by default, preserving separate backend signup/SSE limits without trusting browser-supplied IPs. If this frontend is accessible **only** through Railway's trusted HTTP edge, set `SWARM_TRUST_RAILWAY_CLIENT_IP=1` on the frontend to preserve the edge's validated `X-Real-IP`. Leave it unset for direct/untrusted ingress; don't enable it with a raw TCP proxy. The private backend must also trust this proxy: enable its `SWARM_TRUST_RAILWAY_CLIENT_IP=1` only when it is reachable solely through trusted ingress/private services, or configure Uvicorn's `--proxy-headers --forwarded-allow-ips=<this proxy's IP>`. Otherwise all visitors share the backend's per-IP stream cap. See the backend deployment guide for trusted-ingress restrictions.
+
 Actual contributor instructions are linked to the platform repository rather than duplicating provisional CLI commands. The setup dialog copies only the repository clone command.
 
 Do not store secrets in `VITE_*` environment variables: they are public build-time configuration.
