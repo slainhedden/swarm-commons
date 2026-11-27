@@ -5,17 +5,17 @@ from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
+from support import approve, test_app
 
 from swarm_commons import guards, verification
 from swarm_commons.client import SwarmError, SwarmUnavailable
 from swarm_commons.local import Policy, usage_reservation
 from swarm_commons.providers import provider_command, stream_run
-from swarm_commons.server import create_app
 from test_api import PREFIX, contributor, proposal
 
 
 def test_dependencies_handoff_and_quorum(tmp_path):
-    app = create_app(tmp_path / "test.sqlite3", seed=False, review_quorum=2)
+    app = test_app(tmp_path / "test.sqlite3", seed=False, review_quorum=2)
     with TestClient(app) as browser:
         author = contributor(browser, "author")
         builder = contributor(browser, "builder")
@@ -25,6 +25,7 @@ def test_dependencies_handoff_and_quorum(tmp_path):
         payload = {"title": "Follow-up", "description": "Continue setup", "criteria": "Review", "depends_on": [first]}
         assert browser.post(f"{PREFIX}/goals/{another_goal}/tasks", headers=author, json=payload).status_code == 422
         second = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=author, json=payload).json()
+        approve(browser, "tasks", second["id"])
         assert second["depends_on"] == [first] and not second["ready"]
         assert browser.post(f"{PREFIX}/tasks/{second['id']}/claim", headers=builder).status_code == 409
         assert [row["id"] for row in browser.get(f"{PREFIX}/tasks?goal_id={goal}&available=true").json()] == [first]
@@ -47,6 +48,8 @@ def test_dependencies_handoff_and_quorum(tmp_path):
         assert browser.get(f"{PREFIX}/tasks/{second['id']}").json()["ready"]
         assert browser.get(f"{PREFIX}/goals/{goal}").json()["status"] == "open"
         assert browser.post(f"{PREFIX}/tasks/{second['id']}/claim", headers=builder).status_code == 200
+        submission["pr_url"] = "https://github.com/example/docs/pull/3"
+        submission["handoff"]["diff_url"] = submission["pr_url"] + "/files"
         submission["handoff"]["tests"][0]["outcome"] = "failed"
         assert browser.post(f"{PREFIX}/tasks/{second['id']}/submit", headers=builder, json=submission).status_code == 200
         for identity in (reviewer, author):
@@ -57,7 +60,7 @@ def test_dependencies_handoff_and_quorum(tmp_path):
 
 def test_path_reservations_span_goals_and_expire(tmp_path):
     now = [1000]
-    with TestClient(create_app(tmp_path / "test.sqlite3", seed=False, clock=lambda: now[0])) as browser:
+    with TestClient(test_app(tmp_path / "test.sqlite3", seed=False, clock=lambda: now[0])) as browser:
         alice = contributor(browser, "alice")
         bob = contributor(browser, "bobby")
         _, first = proposal(browser, alice)

@@ -3,9 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from support import live_server
-
-from swarm_commons.server import create_app
+from support import approve, live_server, test_app
 
 
 PREFIX = "/api/v1"
@@ -14,7 +12,7 @@ PREFIX = "/api/v1"
 @pytest.fixture
 def app(tmp_path):
     now = [1000]
-    with TestClient(create_app(tmp_path / "test.sqlite3", seed=False,
+    with TestClient(test_app(tmp_path / "test.sqlite3", seed=False,
                                clock=lambda: now[0], lease_seconds=120)) as browser:
         yield browser, now
 
@@ -25,16 +23,25 @@ def contributor(browser, handle):
     return {"Authorization": f"Bearer {response.json()['token']}"}
 
 
+def password_account(browser, handle):
+    response = browser.post(f"{PREFIX}/auth/register", json={"username": handle, "password": "a unique passphrase"})
+    assert response.status_code == 201, response.text
+    browser.cookies.clear()
+    return {"Authorization": f"Bearer {response.json()['token']}"}
+
+
 def proposal(browser, author, label="Test"):
     goal = browser.post(f"{PREFIX}/goals", headers=author, json={
         "title": label, "description": "A public goal", "repo_url": "https://github.com/example/docs",
     })
     assert goal.status_code == 201, goal.text
     goal_id = goal.json()["id"]
+    approve(browser, "goals", goal_id)
     task = browser.post(f"{PREFIX}/goals/{goal_id}/tasks", headers=author, json={
         "title": "Write documentation", "description": "Update the README", "criteria": "Review the instructions",
     })
     assert task.status_code == 201, task.text
+    approve(browser, "tasks", task.json()["id"])
     return goal_id, task.json()["id"]
 
 
@@ -60,7 +67,7 @@ def test_accounts_and_cors(app):
 def test_voting_progress_and_submission(app):
     browser, _ = app
     author = contributor(browser, "river")
-    worker = contributor(browser, "casey")
+    worker = password_account(browser, "casey")
     first, _ = proposal(browser, author)
     goal, task = proposal(browser, author, "More docs")
     for path in (f"goals/{goal}", f"tasks/{task}"):
@@ -111,7 +118,7 @@ def test_claim_race_heartbeat_and_expiration(app):
 
 def test_notes_subtasks_forum_and_activity(app):
     browser, _ = app
-    author = contributor(browser, "river")
+    author = password_account(browser, "river")
     goal, task = proposal(browser, author)
     assert browser.post(f"{PREFIX}/goals/{goal}/notes", headers=author, json={"body": "Public finding"}).status_code == 201
     assert browser.get(f"{PREFIX}/goals/{goal}/notes").json()[0]["author"] == "river"

@@ -1,0 +1,11 @@
+{% macro vote_button(kind, item, viewer, my_votes) -%}
+{% if viewer %}
+{% set voted = item.id in my_votes.get(kind, []) %}
+<form action="/vote/{{ kind }}/{{ item.id }}{% if voted %}?remove=true{% endif %}" method="post">
+  <button class="secondary" aria-pressed="{{ 'true' if voted else 'false' }}">{{ '✓ Voted · Remove' if voted else '↑ Upvote' }} · {{ item.votes }}</button>
+</form>
+{% else %}<span class="badge">↑ {{ item.votes }}</span>{% endif %}
+{%- endmacro %}
+{% macro report_link(kind, id, viewer) -%}
+{% if viewer %}<a href="/report/{{ kind }}/{{ id }}">Report</a>{% endif %}
+{%- endmacro %}

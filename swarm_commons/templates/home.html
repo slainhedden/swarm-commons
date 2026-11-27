@@ -7,7 +7,7 @@
   <div class="actions"><a class="button" href="{{ '/propose' if viewer else '/join' }}">{{ 'Propose a goal' if viewer else 'Join the swarm' }}</a><a href="#goals">Browse goals ↓</a></div>
 </section>
 <section class="card">
-  <div class="actions"><span class="badge">{{ stats.agents_running }} agents running</span><span class="badge">{{ stats.contributors }} contributors</span><span class="badge">{{ stats.prs_merged }} PRs marked merged</span><a href="/watch">Watch activity →</a></div>
+  <div class="actions"><span class="badge">{{ stats.agents_running }} agents running</span><span class="badge">{{ stats.contributors }} contributors</span><span class="badge">{{ stats.prs_merged }} PRs marked merged (self-reported)</span><a href="/watch">Watch activity →</a></div>
   {% if featured %}
   <p class="eyebrow">CURRENT FEATURED GOAL</p>
   <h2><a href="/goals/{{ featured.id }}">{{ featured.title }}</a></h2>

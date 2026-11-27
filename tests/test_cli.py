@@ -1,15 +1,16 @@
 import asyncio
+import json
 import os
 import subprocess
 from contextlib import nullcontext
 
+import pytest
 from fastapi.testclient import TestClient
-from support import live_server
+from support import approve, live_server, test_app
 
 from swarm_commons import cli
 from swarm_commons.client import save_config
 from swarm_commons.mcp_tools import create_mcp
-from swarm_commons.server import create_app
 
 
 def git(*args, cwd):
@@ -36,7 +37,9 @@ def setup_browser(browser):
     token = browser.post("/api/v1/contributors", json={"handle": "example"}).json()["token"]
     client = BrowserClient(browser, {"Authorization": f"Bearer {token}"})
     goal = client.post("goals", title="Better docs", description="Document setup", repo_url="https://github.com/example/docs")
+    approve(browser, "goals", goal["id"])
     task = client.post(f"goals/{goal['id']}/tasks", title="Add setup", description="Describe it", criteria="Be clear")
+    approve(browser, "tasks", task["id"])
     return client, goal, task
 
 
@@ -62,13 +65,26 @@ def test_fake_run_against_local_bare_repo(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("PATH", str(bin_path) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    app = create_app(tmp_path / "test.sqlite3", seed=False)
+    app = test_app(tmp_path / "test.sqlite3", seed=False)
     with TestClient(app) as browser, live_server(app) as url:
         client, _, task = setup_browser(browser)
         save_config({"server": url, "token": client.headers["Authorization"].removeprefix("Bearer ")})
+        with monkeypatch.context() as missing:
+            which = cli.shutil.which
+            missing.setattr(cli.shutil, "which", lambda name: None if name == "claude" else which(name))
+            missing.setattr("builtins.input", lambda _: "y")
+            assert cli.main(["run", str(task["id"]), "--agent", "claude"]) == 1
+            assert "claude is not installed" in capsys.readouterr().err
+            assert client.get(f"tasks/{task['id']}")["status"] == "open"
+            assert "started" not in {event["kind"] for event in client.get("activity")}
         monkeypatch.setattr("builtins.input", lambda _: "n")
         assert cli.main(["run", str(task["id"]), "--agent", "fake"]) == 0
         assert client.get(f"tasks/{task['id']}")["status"] == "open"
+        declined = iter(("y", "n"))
+        monkeypatch.setattr("builtins.input", lambda _: next(declined))
+        assert cli.main(["run", str(task["id"]), "--agent", "fake"]) == 0
+        assert client.get(f"tasks/{task['id']}")["status"] == "open"
+        assert "Released task" in capsys.readouterr().out
         answers = iter(("y", "y", "Tested a fake agent"))
         monkeypatch.setattr("builtins.input", lambda _: next(answers))
         assert cli.main(["run", str(task["id"]), "--agent", "fake"]) == 0
@@ -79,14 +95,32 @@ def test_fake_run_against_local_bare_repo(tmp_path, monkeypatch, capsys):
         worktree = next((tmp_path / "state" / "swarm-commons" / "workspaces").glob("*/worktree"))
         assert (worktree / ".git").is_file()
         assert {item["kind"] for item in client.get("activity")} >= {"started", "finished", "submitted"}
+        events = [item for item in client.get("activity") if item["kind"] in {"started", "finished"}]
+        assert events[0]["run_id"] == events[1]["run_id"]
+        assert events[0]["run_id"] != events[2]["run_id"]
         refs = git("for-each-ref", "--format=%(refname)", "refs/heads/swarm", cwd=remote).splitlines()
         assert len(refs) == 1
         assert "Fake agent result" in git("show", f"{refs[0]}:SWARM-FAKE-RESULT.md", cwd=remote)
         assert "Result reported to Swarm Commons." in capsys.readouterr().out
 
 
+def test_interrupted_run_reports_failed_status_and_reason(tmp_path):
+    with TestClient(test_app(tmp_path / "test.sqlite3", seed=False)) as browser:
+        client, goal, task = setup_browser(browser)
+        client.post(f"tasks/{task['id']}/claim")
+        with pytest.raises(KeyboardInterrupt), cli.report_run(client, task["id"], "fake"):
+            raise KeyboardInterrupt
+        failed, started = [item for item in client.get("activity") if item["kind"] in {"failed", "started"}]
+        assert failed["kind"] == "failed"
+        assert failed["summary"] == "Interrupted by contributor."
+        assert failed["run_id"] == started["run_id"]
+        watch = browser.get(f"/watch?goal_id={goal['id']}")
+        assert 'event-failed' in watch.text and '<time' in watch.text
+        assert f"Run {failed['run_id'][:8]}" in watch.text
+
+
 def test_mcp_tools_coordinate_with_the_api(tmp_path):
-    with TestClient(create_app(tmp_path / "test.sqlite3", seed=False)) as browser:
+    with TestClient(test_app(tmp_path / "test.sqlite3", seed=False)) as browser:
         client, goal, task = setup_browser(browser)
         mcp = create_mcp(lambda: nullcontext(client))
 
@@ -96,6 +130,8 @@ def test_mcp_tools_coordinate_with_the_api(tmp_path):
                             "read_notes", "propose_subtasks", "submit_result", "reserve_path"}
             await mcp.call_tool("claim_task", {"id": task["id"]})
             await mcp.call_tool("post_note", {"goal_id": goal["id"], "body": "Finding from MCP"})
+            notes = await mcp.call_tool("read_notes", {"goal_id": goal["id"]})
+            assert json.loads(notes[0].text)["trust"] == "untrusted"
             await mcp.call_tool("propose_subtasks", {"parent_id": task["id"], "tasks": [
                 {"title": "Follow-up", "description": "Check the result", "criteria": "Verify setup"},
             ]})
@@ -104,5 +140,5 @@ def test_mcp_tools_coordinate_with_the_api(tmp_path):
 
         asyncio.run(exercise())
         assert client.get(f"goals/{goal['id']}/notes")[0]["body"] == "Finding from MCP"
-        assert client.get("tasks", available=True)[0]["parent_id"] == task["id"]
+        assert client.get("tasks", available=True) == []
         assert client.get(f"tasks/{task['id']}")["status"] == "submitted"

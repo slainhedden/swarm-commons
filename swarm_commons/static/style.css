@@ -14,7 +14,7 @@ section{margin:3rem 0}
 .hero{padding:clamp(1.5rem,5vw,4rem);background:#e3efdf;border:1px solid #cadcc7;border-radius:22px}
 .hero p:not(.eyebrow){max-width:60ch}
 .hero.compact{margin-top:1rem}
-h1,h2,h3{line-height:1.1;letter-spacing:-.04em;margin:.35em 0}
+h1,h2,h3{line-height:1.1;letter-spacing:-.04em;margin:.35em 0;overflow-wrap:anywhere}
 h1{font-size:clamp(2.5rem,7vw,5rem);max-width:17ch}
 h2{font-size:clamp(1.65rem,4vw,2.4rem)}
 h3{font-size:1.4rem}
@@ -25,6 +25,10 @@ h3 a{color:inherit}
 .card{border:1px solid var(--line);background:white;border-radius:15px;padding:1.3rem;overflow-wrap:anywhere}
 .task{margin:.75rem 0}
 .badge{display:inline-block;background:#edf2eb;color:#334c40;padding:.15rem .65rem;border-radius:999px;font-size:.83rem;letter-spacing:normal}
+.event-started,.event-progress{background:#dcecfb;color:#163e63}
+.event-failed{background:#fce6e3;color:#782324}
+.event-finished,.event-submitted{background:#d9eddf;color:#18553a}
+#activity li{margin-bottom:.65rem}
 .button,button{display:inline-block;border:1px solid var(--accent);border-radius:8px;background:var(--accent);color:white;padding:.45rem .9rem;text-decoration:none;font-weight:650;cursor:pointer}
 .secondary,.quiet{background:transparent;color:var(--accent)}
 .quiet{border-color:transparent;padding:0}
@@ -37,6 +41,7 @@ textarea{min-height:6rem;resize:vertical}
 .preserve{white-space:pre-wrap}
 code{background:#e6ede3;padding:.1rem .3rem;border-radius:4px}
 .token{overflow-wrap:anywhere}
+#share-link{width:auto;max-width:100%}
 table{border-collapse:collapse;width:100%;text-align:left}
 th,td{border-bottom:1px solid var(--line);padding:.55rem}
 footer{border-top:1px solid var(--line);padding:1rem 0 2rem;color:var(--muted)}

@@ -6,17 +6,19 @@ A public queue for open-source work. Propose goals, vote on priorities, pick an 
 
 - Run `docker compose up --build` for the site and PostgreSQL, or install [uv](https://docs.astral.sh/uv/) and run `make dev` for the local SQLite fallback.
 - Visit <http://localhost:8000>, create an account, and explore the seeded demo goals, discussions and activity. Demo proposals are examples, not invitations from upstream maintainers. Use a public repository you control for your first real run.
-- From a checkout, run `sh install.sh .`. From a released GitHub repository, run `sh install.sh` (optionally pass a Git ref or another install source).
+- Until the GitHub repository is published, use a source checkout and run `sh install.sh .`. Once published, `sh install.sh` installs from GitHub (or accepts another install source).
 - Install and sign into official `claude` (Claude subscription) or `codex` (ChatGPT login), and sign into `gh`. Configure Git's identity and HTTPS push credentials (for example with `gh auth setup-git`).
 
 ```sh
 swarm doctor
 swarm login --server http://localhost:8000 --username YOUR_USERNAME
 swarm tasks
-swarm run 1 --agent claude --budget-minutes 15
+swarm run YOUR_APPROVED_TASK_ID --agent fake
 ```
 
-You can also create a token-only account with `swarm login --server URL --handle YOUR_HANDLE` or reconnect with `--existing` and a Swarm token. The CLI stores only its Swarm credential in the local user config. A task run first shows the repository and prompt and asks whether to run the agent. It only pushes and opens a PR after a second confirmation and a contributor-written summary. The workspace is retained for inspection regardless of whether you publish.
+For the fake run, propose a goal and task against **your own public throwaway GitHub repository** and have them approved from the moderation queue. The fake agent writes a local test file without using a provider subscription. Say no at the publish prompt to avoid creating a PR. Substitute `--agent claude` or `--agent codex` only when you want to use your own subscription.
+
+You can also create a token-only account with `swarm login --server URL --handle YOUR_HANDLE` or reconnect with `--existing` and a Swarm token. Token-only accounts may contribute but cannot vote. A task run shows the full repository prompt before confirmation and verifies local tool sign-in before claiming. It only pushes and opens a PR after a second confirmation and a contributor-written summary. The workspace is retained regardless of publishing; an aborted run releases the claim, and `swarm release ID` can release a manual claim.
 
 ## Local MCP
 
@@ -59,6 +61,8 @@ References: [Claude Code legal and compliance](https://code.claude.com/docs/en/l
 FastAPI serves the Jinja website and [versioned JSON API](docs/API.md); `/docs` serves OpenAPI. SQLite is for local development and tests. Production uses plain Postgres via SQLAlchemy/psycopg; set `DATABASE_URL` to a PostgreSQL connection string from Neon, Supabase, PlanetScale Postgres, or any compatible service. Run `python -m swarm_commons.migrate` before starting production workers to apply the Alembic migrations. The development Compose setup does this automatically.
 
 Use HTTPS outside loopback, set `SWARM_SEED=0` for a clean deployment, and set `SWARM_CORS_ORIGINS` (comma-separated) to the frontend origins. Deploy behind a trusted reverse proxy. Serve `/api/v1/events/stream` without buffering. Activity contains public summaries, not streamed terminal output. Demo data is seeded only once when the queue is empty; a demo run ages out of live statistics.
+
+To bootstrap moderation, reserve one or more comma-separated handles with `SWARM_ADMINS`, then provision each on the trusted host: `SWARM_ADMINS=swarm-admin uv run python -m swarm_commons.admin swarm-admin`. Run migrations first and set the same `DATABASE_URL` if using Postgres. Accounts are created with an interactive password, not automatically on public signup. The first admin can grant moderator access through the API. New goals need moderator approval; new tasks need goal-owner or moderator approval. Limit settings include `SWARM_GOAL_DAILY_LIMIT` (default 3) and `SWARM_VOTE_MIN_AGE_SECONDS` (default 600). Set `SWARM_PUBLIC_ORIGIN` to your HTTPS origin if the reverse proxy gives Uvicorn a different base URL. PR metadata checks use GitHub's public API without contributor credentials, and network failures leave links unverified. Set `SWARM_CHECK_GITHUB_PRS=0` only for local fake runs.
 
 ```sh
 make test

@@ -5,19 +5,25 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.security import HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field, StringConstraints, ValidationError
+from pydantic import BaseModel, BeforeValidator, Field, StringConstraints, ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from .accounts import password_hash, token_hash, verify_password
+from .moderation import (
+    KINDS, RESERVED, Kind, LimitWriteBody, ModerationInput, ReportInput, RoleInput, admin_handles, check_github_pr, plain_text,
+)
 from .orchestration import (
     READY_FILTER, Handoff, PathCheckInput, PathLeaseInput, ReviewInput,
     check_paths, lease_path, register_dependencies,
@@ -28,8 +34,8 @@ from .store import connect, database, initialize, migrate
 ROOT = Path(__file__).parent
 HANDLE = r"^[a-z0-9][a-z0-9_-]{1,38}$"
 REPO = re.compile(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+")
-Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=140)]
-Body = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=5000)]
+Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=140), BeforeValidator(plain_text)]
+Body = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=5000), BeforeValidator(plain_text)]
 
 
 class Signup(BaseModel):
@@ -46,6 +52,25 @@ class GoalInput(BaseModel):
     description: Body
     repo_url: Annotated[str, StringConstraints(strip_whitespace=True, max_length=250)]
 
+
+class ProgressResponse(BaseModel):
+    total: int
+    open: int
+    claimed: int
+    submitted: int
+    done: int
+    percent_done: int
+
+
+class GoalResponse(GoalInput):
+    id: int
+    author: str
+    votes: int
+    task_count: int
+    visibility: str
+    created_at: int
+    status: Literal["open", "done"]
+    progress: ProgressResponse
 
 class TaskInput(BaseModel):
     title: Title
@@ -77,6 +102,18 @@ class ThreadInput(BaseModel):
 class EventInput(BaseModel):
     kind: Literal["started", "progress", "finished", "failed"]
     summary: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=280)]
+    run_id: Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{32}$")] | None = None
+
+
+class EventResponse(BaseModel):
+    id: int
+    goal_id: int | None
+    task_id: int | None
+    actor: str
+    kind: str
+    summary: str
+    created_at: int
+    run_id: str | None
 
 
 def repo_url(value):
@@ -92,12 +129,17 @@ def require_row(row, kind):
     return dict(row)
 
 
-def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, database_url=None, review_quorum=None):
+def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, database_url=None, review_quorum=None,
+               vote_age=None, claim_cap=2, pr_checker=None, write_limit=40, signup_limit=5):
     path = Path(db_path or os.environ.get("SWARM_DB", "swarm.sqlite3"))
     database_url = database_url or (os.environ.get("DATABASE_URL") if db_path is None else None)
     engine = database(path, database_url)
     seed = os.environ.get("SWARM_SEED", "1") != "0" if seed is None else seed
     review_quorum = max(1, int(os.environ.get("SWARM_REVIEW_QUORUM", "1"))) if review_quorum is None else review_quorum
+    vote_age = int(os.environ.get("SWARM_VOTE_MIN_AGE_SECONDS", "600")) if vote_age is None else vote_age
+    goal_quota = max(1, int(os.environ.get("SWARM_GOAL_DAILY_LIMIT", "3")))
+    pr_checker = pr_checker or (check_github_pr if os.environ.get("SWARM_CHECK_GITHUB_PRS", "1") == "1" else
+                                lambda *_: "unverified")
 
     @asynccontextmanager
     async def lifespan(_):
@@ -111,12 +153,15 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             engine.dispose()
 
     app = FastAPI(title="Swarm Commons", lifespan=lifespan)
+    app.add_middleware(LimitWriteBody)
     origins = [item.strip() for item in os.environ.get("SWARM_CORS_ORIGINS", "*").split(",") if item.strip()]
-    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST"],
+    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "DELETE"],
                        allow_headers=["Authorization", "Content-Type", "Last-Event-ID"],
                        allow_credentials=bool(origins and "*" not in origins))
+    bearer_scheme = HTTPBearer(auto_error=False, scheme_name="SwarmBearer")
     api = APIRouter(prefix="/api/v1")
     templates = Jinja2Templates(directory=ROOT / "templates")
+    templates.env.filters["utc"] = lambda seconds: datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="seconds")
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
     def session(db, handle, *, permanent=False):
@@ -126,20 +171,21 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return {"handle": handle, "token": token}
 
     def signup(handle, password=None):
-        if handle == "demo" or handle.startswith("demo-"):
+        if handle in RESERVED | admin_handles() or handle.startswith("demo"):
             raise HTTPException(409, "That handle is reserved.")
         hashed = password_hash(password) if password is not None else None
         try:
             with connect(engine, write=True) as db:
-                db.execute("INSERT INTO contributors VALUES (?, ?)", (handle, hashed))
+                db.execute("INSERT INTO contributors (handle, password_hash, created_at) VALUES (?, ?, ?)",
+                           (handle, hashed, int(clock())))
                 return session(db, handle, permanent=password is None)
         except IntegrityError:
             raise HTTPException(409, "That handle is already taken.") from None
 
     def authenticate(data):
         with connect(engine) as db:
-            row = db.execute("SELECT password_hash FROM contributors WHERE handle = ?", (data.username,)).fetchone()
-        if not verify_password(data.password, row["password_hash"] if row else None):
+            row = db.execute("SELECT password_hash, banned FROM contributors WHERE handle = ?", (data.username,)).fetchone()
+        if not verify_password(data.password, row["password_hash"] if row else None) or row["banned"]:
             raise HTTPException(401, "Username or password is incorrect.")
         with connect(engine, write=True) as db:
             return session(db, data.username)
@@ -155,7 +201,8 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             return None
         with connect(engine) as db:
             row = db.execute("""
-                SELECT handle FROM sessions WHERE token_hash = ? AND (expires_at IS NULL OR expires_at > ?)
+                SELECT s.handle FROM sessions s JOIN contributors c ON c.handle = s.handle
+                WHERE s.token_hash = ? AND c.banned = 0 AND (s.expires_at IS NULL OR s.expires_at > ?)
             """, (token_hash(token), int(clock()))).fetchone()
         return row["handle"] if row else None
 
@@ -177,12 +224,56 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def contributor(request, *, web=False):
         handle = viewer(request, web=web)
         if handle is None:
-            raise HTTPException(401, "Sign in with a Swarm contributor token.")
+            raise HTTPException(401, "Sign in to Swarm Commons again; your session may have expired.")
         return handle
+
+    def authenticate_request(request: Request, _=Depends(bearer_scheme)):
+        if request.method != "GET" and not request.headers.get("Authorization", "").startswith("Bearer "):
+            web_origin(request)
+        return contributor(request)
+
+    auth = Depends(authenticate_request)
+
+    def role_in(db, handle):
+        if not handle:
+            return "contributor"
+        row = db.execute("SELECT role FROM contributors WHERE handle = ? AND banned = 0", (handle,)).fetchone()
+        return row["role"] if row else "contributor"
+
+    def role(handle):
+        with connect(engine) as db:
+            return role_in(db, handle)
+
+    def moderator(handle):
+        return role(handle) in {"admin", "moderator"}
+
+    def count_write(ip, handle, signup_attempt):
+        minute = int(clock()) // 60
+        key = f"signup:{ip}" if signup_attempt else f"write:{handle or ip}"
+        with connect(engine, write=True) as db:
+            db.execute("DELETE FROM rate_buckets WHERE minute < ?", (minute - 10,))
+            count = db.execute("""
+                INSERT INTO rate_buckets VALUES (?, ?, 1)
+                ON CONFLICT (key, minute) DO UPDATE SET hits = rate_buckets.hits + 1 RETURNING hits
+            """, (key, minute)).fetchone()["hits"]
+        return count <= (signup_limit if signup_attempt else write_limit)
+
+    @app.middleware("http")
+    async def rate_limit(request, call_next):
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            path = request.url.path
+            ip = request.client.host if request.client else "unknown"
+            signup_attempt = path in {"/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/contributors", "/join"}
+            handle = None if signup_attempt else await run_in_threadpool(viewer, request)
+            if not await run_in_threadpool(count_write, ip, handle, signup_attempt):
+                return JSONResponse({"detail": "Too many writes. Try again in a minute."}, status_code=429, headers={"Retry-After": "60"})
+        return await call_next(request)
 
     def progress(db, goal_id):
         counts = dict.fromkeys(("open", "claimed", "submitted", "done"), 0)
-        for row in db.execute("SELECT status, COUNT(*) AS count FROM tasks WHERE goal_id = ? GROUP BY status", (goal_id,)):
+        for row in db.execute("""
+            SELECT status, COUNT(*) AS count FROM tasks WHERE goal_id = ? AND visibility = 'approved' GROUP BY status
+        """, (goal_id,)):
             counts[row["status"]] = row["count"]
         total = sum(counts.values())
         return {"total": total, **counts, "percent_done": counts["done"] * 100 // total if total else 0}
@@ -197,19 +288,23 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             expire(db)
             items = [dict(row) for row in db.execute("""
                 SELECT g.*, (SELECT COUNT(*) FROM goal_votes WHERE goal_id = g.id) AS votes,
-                    (SELECT COUNT(*) FROM tasks WHERE goal_id = g.id) AS task_count
-                FROM goals g ORDER BY votes DESC, g.id
+                    (SELECT COUNT(*) FROM tasks WHERE goal_id = g.id AND visibility = 'approved') AS task_count
+                FROM goals g WHERE g.visibility = 'approved' ORDER BY votes DESC, g.id
             """)]
             return [with_progress(db, item) for item in items]
 
-    def goal(goal_id):
+    def goal(goal_id, handle=None, *, any_visibility=False):
         with connect(engine, write=True) as db:
             expire(db)
             item = require_row(db.execute("""
                 SELECT g.*, (SELECT COUNT(*) FROM goal_votes WHERE goal_id = g.id) AS votes,
-                    (SELECT COUNT(*) FROM tasks WHERE goal_id = g.id) AS task_count
+                    (SELECT COUNT(*) FROM tasks WHERE goal_id = g.id AND visibility = 'approved') AS task_count
                 FROM goals g WHERE id = ?
             """, (goal_id,)).fetchone(), "Goal")
+            if item["visibility"] != "approved" and not any_visibility and not (handle and (
+                item["author"] == handle or role_in(db, handle) in {"admin", "moderator"}
+            )):
+                raise HTTPException(404, "Goal not found.")
             return with_progress(db, item)
 
     def featured():
@@ -217,7 +312,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return next((item for item in items if item["progress"]["percent_done"] < 100), items[0] if items else None)
 
     task_query = f"""
-        SELECT t.*, g.repo_url, g.title AS goal_title,
+        SELECT t.*, g.repo_url, g.title AS goal_title, g.author AS goal_author, g.visibility AS goal_visibility,
             (SELECT COUNT(*) FROM task_votes WHERE task_id = t.id) AS votes,
             ({READY_FILTER}) AS ready
         FROM tasks t JOIN goals g ON g.id = t.goal_id
@@ -242,89 +337,131 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
 
     def expire(db):
         db.execute("""
-            UPDATE tasks SET status = 'open', claimant = NULL, lease_until = NULL, last_heartbeat = NULL
+            UPDATE tasks SET status = 'open', claimant = NULL, lease_until = NULL, last_heartbeat = NULL, claimed_at = NULL
             WHERE status = 'claimed' AND lease_until <= ?
         """, (int(clock()),))
 
-    def tasks(goal_id=None, available=False):
+    def tasks(goal_id=None, available=False, handle=None):
         with connect(engine, write=True) as db:
             expire(db)
-            conditions, params = ["1 = 1"], ()
+            conditions, params = ["g.visibility = 'approved'", "t.visibility = 'approved'"], ()
+            if handle and goal_id is not None:
+                if role_in(db, handle) in {"admin", "moderator"}:
+                    conditions = ["t.visibility IN ('approved', 'pending')"]
+                else:
+                    conditions = [
+                        "(g.visibility = 'approved' OR g.author = ?)",
+                        "(t.visibility = 'approved' OR (t.visibility = 'pending' AND (t.author = ? OR g.author = ?)))",
+                    ]
+                    params = (handle, handle, handle)
             if goal_id is not None:
                 conditions.append("t.goal_id = ?")
-                params = (goal_id,)
+                params += (goal_id,)
             if available:
-                conditions.extend(("t.status = 'open'", READY_FILTER))
+                conditions.extend(("t.status = 'open'", "g.visibility = 'approved'", "t.visibility = 'approved'", READY_FILTER))
             query = task_query + " WHERE " + " AND ".join(conditions) + " ORDER BY votes DESC, t.id"
             rows = [dict(row) for row in db.execute(query, params)]
             return [task_details(db, row, review=True) for row in rows]
 
-    def task(task_id):
+    def task(task_id, handle=None, *, any_visibility=False):
         with connect(engine, write=True) as db:
             expire(db)
             item = require_row(db.execute(task_query + " WHERE t.id = ?", (task_id,)).fetchone(), "Task")
+            if (item["visibility"] != "approved" or item["goal_visibility"] != "approved") and not any_visibility:
+                if not handle or not (
+                    handle in {item["author"], item["goal_author"]} or role_in(db, handle) in {"admin", "moderator"}
+                ):
+                    raise HTTPException(404, "Task not found.")
             return task_details(db, item, review=True)
 
     def add_goal(data, handle):
         url = repo_url(data.repo_url)
         with connect(engine, write=True) as db:
+            suffix = " FOR UPDATE" if db.connection.dialect.name == "postgresql" else ""
+            db.execute("SELECT handle FROM contributors WHERE handle = ?" + suffix, (handle,)).fetchone()
+            now = int(clock())
+            recent = db.execute("SELECT COUNT(*) AS total FROM goals WHERE author = ? AND created_at > ?",
+                                (handle, now - 86400)).fetchone()["total"]
+            if recent >= goal_quota:
+                raise HTTPException(429, "Daily goal proposal limit reached.")
             goal_id = db.execute(
-                "INSERT INTO goals (title, description, repo_url, author) VALUES (?, ?, ?, ?) RETURNING id",
-                (data.title, data.description, url, handle),
+                "INSERT INTO goals (title, description, repo_url, author, visibility, created_at) VALUES (?, ?, ?, ?, 'pending', ?) RETURNING id",
+                (data.title, data.description, url, handle, now),
             ).fetchone()["id"]
-            log(db, "goal_proposed", f"Proposed goal: {data.title}", handle, goal_id)
-        return goal(goal_id)
+            log(db, "goal_proposed", "Proposed a goal.", handle, goal_id)
+        return goal(goal_id, any_visibility=True)
 
     def insert_task(db, goal_id, data, handle, parent_id=None):
         task_id = db.execute("""
-            INSERT INTO tasks (goal_id, parent_id, title, description, criteria, author)
-            VALUES (?, ?, ?, ?, ?, ?) RETURNING id
+            INSERT INTO tasks (goal_id, parent_id, title, description, criteria, author, visibility)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending') RETURNING id
         """, (goal_id, parent_id, data.title, data.description, data.criteria, handle)).fetchone()["id"]
         register_dependencies(db, goal_id, task_id, data.depends_on)
         return task_id
 
     def add_task(goal_id, data, handle):
-        goal(goal_id)
+        goal(goal_id, handle)
         with connect(engine, write=True) as db:
             task_id = insert_task(db, goal_id, data, handle)
-            log(db, "task_proposed", f"Proposed task: {data.title}", handle, goal_id, task_id)
-        return task(task_id)
+            log(db, "task_proposed", "Proposed a task.", handle, goal_id, task_id)
+        return task(task_id, any_visibility=True)
 
-    def vote(kind, item_id, handle):
+    def vote(kind, item_id, handle, *, remove=False):
         if kind == "goals":
             goal(item_id)
-            statement = "INSERT INTO goal_votes VALUES (?, ?) ON CONFLICT DO NOTHING"
+            column, table = "goal_id", "goal_votes"
             get_item = goal
         elif kind == "tasks":
             task(item_id)
-            statement = "INSERT INTO task_votes VALUES (?, ?) ON CONFLICT DO NOTHING"
+            column, table = "task_id", "task_votes"
             get_item = task
         elif kind == "threads":
             thread(item_id)
-            statement = "INSERT INTO thread_votes VALUES (?, ?) ON CONFLICT DO NOTHING"
+            column, table = "thread_id", "thread_votes"
             get_item = thread
         elif kind == "comments":
             comment(item_id)
-            statement = "INSERT INTO comment_votes VALUES (?, ?) ON CONFLICT DO NOTHING"
+            column, table = "comment_id", "comment_votes"
             get_item = comment
         else:
             raise HTTPException(404, "Unknown vote target.")
         with connect(engine, write=True) as db:
-            db.execute(statement, (item_id, handle))
+            if remove:
+                db.execute(f"DELETE FROM {table} WHERE {column} = ? AND handle = ?", (item_id, handle))
+            else:
+                account = db.execute("""
+                    SELECT password_hash, role, created_at FROM contributors WHERE handle = ?
+                """, (handle,)).fetchone()
+                if not account["password_hash"] or (
+                    int(clock()) - account["created_at"] < vote_age and account["role"] == "contributor"
+                ):
+                    raise HTTPException(403, "Voting requires a password account past its new-account waiting period.")
+                db.execute(f"INSERT INTO {table} VALUES (?, ?) ON CONFLICT DO NOTHING", (item_id, handle))
         return get_item(item_id)
 
     def claim(task_id, handle):
         with connect(engine, write=True) as db:
+            suffix = " FOR UPDATE" if db.connection.dialect.name == "postgresql" else ""
+            db.execute("SELECT handle FROM contributors WHERE handle = ?" + suffix, (handle,)).fetchone()
             expire(db)
             item = require_row(db.execute(task_query + " WHERE t.id = ?", (task_id,)).fetchone(), "Task")
+            if item["visibility"] != "approved" or item["goal_visibility"] != "approved":
+                raise HTTPException(409, "Task is not approved for work.")
             if item["status"] == "claimed" and item["claimant"] == handle:
                 return task_details(db, item, review=True)
             if item["status"] != "open" or not item["ready"]:
                 raise HTTPException(409, "Task is not available.")
+            active = db.execute("""
+                SELECT COUNT(*) AS count FROM tasks WHERE status = 'claimed' AND claimant = ?
+            """, (handle,)).fetchone()["count"]
+            if active >= claim_cap:
+                raise HTTPException(409, f"At most {claim_cap} active task claims per contributor.")
+            now = int(clock())
             updated = db.execute(f"""
-                UPDATE tasks AS t SET status = 'claimed', claimant = ?, lease_until = ?
-                WHERE id = ? AND status = 'open' AND {READY_FILTER}
-            """, (handle, int(clock()) + lease_seconds, task_id))
+                UPDATE tasks AS t SET status = 'claimed', claimant = ?, lease_until = ?, claimed_at = ?
+                WHERE id = ? AND status = 'open' AND visibility = 'approved' AND {READY_FILTER}
+                    AND EXISTS (SELECT 1 FROM goals g WHERE g.id = t.goal_id AND g.visibility = 'approved')
+            """, (handle, now + lease_seconds, now, task_id))
             if not updated.rowcount:
                 raise HTTPException(409, "Task is not available.")
             log(db, "claimed", "Claimed a task.", handle, item["goal_id"], task_id)
@@ -336,23 +473,35 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             updated = db.execute("""
                 UPDATE tasks SET lease_until = ?, last_heartbeat = ?
                 WHERE id = ? AND status = 'claimed' AND claimant = ? AND lease_until > ?
+                    AND visibility = 'approved'
+                    AND EXISTS (SELECT 1 FROM goals WHERE goals.id = tasks.goal_id AND visibility = 'approved')
             """, (now + lease_seconds, now, task_id, handle, now))
             if not updated.rowcount:
                 raise HTTPException(409, "Only the active claimant can heartbeat.")
         return task(task_id)
 
     def submit(task_id, data, handle):
+        item = task(task_id)
+        if item["status"] != "claimed" or item["claimant"] != handle:
+            raise HTTPException(409, "Only the active claimant can submit a result.")
+        if not re.fullmatch(re.escape(item["repo_url"]) + r"/pull/[1-9][0-9]*", data.pr_url, re.IGNORECASE):
+            raise HTTPException(422, "Use a GitHub pull request URL on the goal repository.")
+        check = pr_checker(data.pr_url, item["claimed_at"])
+        if check == "invalid":
+            raise HTTPException(422, "Use an open PR created after this claim.")
         with connect(engine, write=True) as db:
             expire(db)
-            item = require_row(db.execute(task_query + " WHERE t.id = ?", (task_id,)).fetchone(), "Task")
-            if item["status"] != "claimed" or item["claimant"] != handle:
-                raise HTTPException(409, "Only the active claimant can submit a result.")
-            if not re.fullmatch(re.escape(item["repo_url"]) + r"/pull/[1-9][0-9]*", data.pr_url, re.IGNORECASE):
-                raise HTTPException(422, "Use a GitHub pull request URL on the goal repository.")
+            if db.connection.dialect.name == "postgresql":
+                db.execute("SELECT pg_advisory_xact_lock(90192732)")
+            if db.execute("SELECT 1 FROM tasks WHERE lower(pr_url) = lower(?)", (data.pr_url,)).fetchone():
+                raise HTTPException(409, "That pull request is already linked to a task.")
             updated = db.execute("""
-                UPDATE tasks SET status = 'submitted', lease_until = NULL, last_heartbeat = NULL, pr_url = ?, summary = ?
+                UPDATE tasks SET status = 'submitted', lease_until = NULL, last_heartbeat = NULL,
+                    pr_url = ?, summary = ?, pr_check = ?
                 WHERE id = ? AND status = 'claimed' AND claimant = ? AND lease_until > ?
-            """, (data.pr_url, data.summary, task_id, handle, int(clock())))
+                    AND visibility = 'approved' AND claimed_at = ?
+                    AND EXISTS (SELECT 1 FROM goals WHERE goals.id = tasks.goal_id AND visibility = 'approved')
+            """, (data.pr_url, data.summary, check, task_id, handle, int(clock()), item["claimed_at"]))
             if not updated.rowcount:
                 raise HTTPException(409, "Only the active claimant can submit a result.")
             if data.handoff:
@@ -363,6 +512,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return task(task_id)
 
     def done(task_id, handle):
+        task(task_id)
         with connect(engine, write=True) as db:
             item = require_row(db.execute("""
                 SELECT t.status, t.author, t.goal_id, g.author AS goal_author
@@ -390,6 +540,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return task(task_id)
 
     def review_task(task_id, data, handle):
+        task(task_id)
         with connect(engine, write=True) as db:
             item = require_row(db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone(), "Task")
             if item["status"] != "submitted":
@@ -407,7 +558,8 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def active_claim(db, task_id, handle, now):
         suffix = " FOR UPDATE OF t" if db.connection.dialect.name == "postgresql" else ""
         item = require_row(db.execute(task_query + " WHERE t.id = ?" + suffix, (task_id,)).fetchone(), "Task")
-        if item["status"] != "claimed" or item["claimant"] != handle or item["lease_until"] <= now:
+        if (item["visibility"] != "approved" or item["goal_visibility"] != "approved" or
+                item["status"] != "claimed" or item["claimant"] != handle or item["lease_until"] <= now):
             raise HTTPException(409, "An active task claim is required.")
         return item
 
@@ -426,9 +578,10 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def notes(goal_id):
         goal(goal_id)
         with connect(engine) as db:
-            return [dict(row) for row in db.execute(
-                "SELECT * FROM notes WHERE goal_id = ? ORDER BY id DESC LIMIT 100", (goal_id,)
-            )]
+            return [dict(row) for row in db.execute("""
+                SELECT n.*, c.created_at AS author_created_at FROM notes n LEFT JOIN contributors c ON c.handle = n.author
+                WHERE n.goal_id = ? AND n.visibility = 'approved' ORDER BY n.id DESC LIMIT 100
+            """, (goal_id,))]
 
     def post_note(goal_id, data, handle):
         goal(goal_id)
@@ -440,41 +593,47 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             return dict(db.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone())
 
     def subtasks(parent_id, data, handle):
-        parent = task(parent_id)
+        parent = task(parent_id, handle)
         with connect(engine, write=True) as db:
             ids = [insert_task(db, parent["goal_id"], item, handle, parent_id) for item in data.tasks]
-        return [task(task_id) for task_id in ids]
+        return [task(task_id, any_visibility=True) for task_id in ids]
 
     def leaders():
         with connect(engine) as db:
             return [dict(row) for row in db.execute("""
                 SELECT claimant AS handle, COUNT(*) AS contributions,
                     SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done
-                FROM tasks WHERE status IN ('submitted', 'done')
+                FROM tasks WHERE status IN ('submitted', 'done') AND visibility = 'approved'
+                    AND EXISTS (SELECT 1 FROM goals WHERE goals.id = tasks.goal_id AND visibility = 'approved')
                 GROUP BY claimant ORDER BY contributions DESC, done DESC, handle
             """)]
 
-    def stats():
+    def stats(goal_id=None):
         now = int(clock())
+        running_filter = " AND goal_id = ?" if goal_id is not None else ""
+        params = (now, now - 90) if goal_id is None else (now, now - 90, goal_id)
         with connect(engine) as db:
-            return dict(db.execute("""
+            return dict(db.execute(f"""
                 SELECT
-                (SELECT COUNT(*) FROM tasks WHERE status = 'claimed' AND lease_until > ?
-                    AND last_heartbeat > ?) AS agents_running,
-                (SELECT COUNT(*) FROM contributors) AS contributors,
-                (SELECT COUNT(*) FROM tasks WHERE status = 'done' AND pr_url IS NOT NULL) AS prs_merged
-            """, (now, now - 90)).fetchone())
+                (SELECT COUNT(*) FROM tasks WHERE status = 'claimed' AND visibility = 'approved' AND lease_until > ?
+                    AND last_heartbeat > ? {running_filter}) AS agents_running,
+                (SELECT COUNT(*) FROM contributors WHERE banned = 0 AND password_hash IS NOT NULL) AS contributors,
+                (SELECT COUNT(*) FROM tasks WHERE status = 'done' AND visibility = 'approved' AND pr_url IS NOT NULL) AS prs_merged
+            """, params).fetchone())
 
-    def log(db, kind, summary, actor, goal_id=None, task_id=None):
+    def log(db, kind, summary, actor, goal_id=None, task_id=None, run_id=None):
         if db.connection.dialect.name == "postgresql":
             db.execute("SELECT pg_advisory_xact_lock(90192731)")
         return dict(db.execute("""
-            INSERT INTO events (goal_id, task_id, actor, kind, summary, created_at)
-            VALUES (?, ?, ?, ?, ?, ?) RETURNING *
-        """, (goal_id, task_id, actor, kind, summary, int(clock()))).fetchone())
+            INSERT INTO events (goal_id, task_id, actor, kind, summary, created_at, run_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *
+        """, (goal_id, task_id, actor, kind, summary, int(clock()), run_id)).fetchone())
 
     def activity(limit=20, goal_id=None, after=None):
-        conditions, params = ["1 = 1"], ()
+        conditions, params = [
+            "(goal_id IS NULL OR EXISTS (SELECT 1 FROM goals g WHERE g.id = events.goal_id AND g.visibility = 'approved'))",
+            "(task_id IS NULL OR EXISTS (SELECT 1 FROM tasks t WHERE t.id = events.task_id AND t.visibility = 'approved'))",
+        ], ()
         if goal_id is not None:
             conditions.append("goal_id = ?")
             params += (goal_id,)
@@ -500,43 +659,57 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 params = ()
             row = db.execute(f"""
                 UPDATE tasks SET {update} WHERE id = ? AND status = 'claimed'
-                    AND claimant = ? AND lease_until > ? RETURNING goal_id
+                    AND claimant = ? AND lease_until > ? AND visibility = 'approved'
+                    AND EXISTS (SELECT 1 FROM goals WHERE goals.id = tasks.goal_id AND visibility = 'approved')
+                    RETURNING goal_id
             """, (*params, task_id, handle, now)).fetchone()
             if row is None:
                 raise HTTPException(409, "Only the active claimant can post run events.")
-            return log(db, data.kind, data.summary, handle, row["goal_id"], task_id)
+            return log(db, data.kind, data.summary, handle, row["goal_id"], task_id, data.run_id)
 
     thread_query = """
         SELECT t.*, (SELECT COUNT(*) FROM thread_votes WHERE thread_id = t.id) AS votes,
-            (SELECT COUNT(*) FROM comments WHERE thread_id = t.id) AS comment_count
+            (SELECT COUNT(*) FROM comments WHERE thread_id = t.id AND visibility = 'approved') AS comment_count
         FROM threads t
     """
     comment_query = """
         SELECT c.*, (SELECT COUNT(*) FROM comment_votes WHERE comment_id = c.id) AS votes FROM comments c
     """
 
-    def threads(goal_id=None, general=False):
-        query = thread_query
+    thread_visible = """
+        t.visibility = 'approved' AND (
+            t.goal_id IS NULL OR EXISTS (SELECT 1 FROM goals g WHERE g.id = t.goal_id AND g.visibility = 'approved')
+        )
+    """
+
+    def threads(goal_id=None, general=False, page=1, limit=20):
+        query = thread_query + " WHERE " + thread_visible
         params = ()
         if goal_id is not None:
-            query += " WHERE t.goal_id = ?"
+            query += " AND t.goal_id = ?"
             params = (goal_id,)
         elif general:
-            query += " WHERE t.goal_id IS NULL"
+            query += " AND t.goal_id IS NULL"
         with connect(engine) as db:
-            return [dict(row) for row in db.execute(query + " ORDER BY t.id DESC LIMIT 100", params)]
+            return [dict(row) for row in db.execute(
+                query + " ORDER BY t.id DESC LIMIT ? OFFSET ?", (*params, limit, (page - 1) * limit),
+            )]
 
     def thread(thread_id):
         with connect(engine) as db:
-            item = require_row(db.execute(thread_query + " WHERE t.id = ?", (thread_id,)).fetchone(), "Thread")
+            item = require_row(db.execute(thread_query + " WHERE t.id = ? AND " + thread_visible,
+                                          (thread_id,)).fetchone(), "Thread")
             item["comments"] = [dict(row) for row in db.execute(
-                comment_query + " WHERE c.thread_id = ? ORDER BY c.id", (thread_id,),
+                comment_query + " WHERE c.thread_id = ? AND c.visibility = 'approved' ORDER BY c.id LIMIT 100", (thread_id,),
             )]
             return item
 
     def comment(comment_id):
         with connect(engine) as db:
-            return require_row(db.execute(comment_query + " WHERE c.id = ?", (comment_id,)).fetchone(), "Comment")
+            item = require_row(db.execute(comment_query + " WHERE c.id = ? AND c.visibility = 'approved'",
+                                          (comment_id,)).fetchone(), "Comment")
+        thread(item["thread_id"])
+        return item
 
     def add_thread(data, handle):
         if data.goal_id is not None:
@@ -546,17 +719,161 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 INSERT INTO threads (goal_id, author, title, body, created_at)
                 VALUES (?, ?, ?, ?, ?) RETURNING id
             """, (data.goal_id, handle, data.title, data.body, int(clock()))).fetchone()["id"]
-            log(db, "thread", f"Started a discussion: {data.title}", handle, data.goal_id)
+            log(db, "thread", "Started a discussion.", handle, data.goal_id)
         return thread(thread_id)
 
     def add_comment(thread_id, data, handle):
         target = thread(thread_id)
         with connect(engine, write=True) as db:
+            suffix = " FOR UPDATE" if db.connection.dialect.name == "postgresql" else ""
+            selected = db.execute("SELECT locked, visibility FROM threads WHERE id = ?" + suffix, (thread_id,)).fetchone()
+            if selected["locked"] or selected["visibility"] != "approved":
+                raise HTTPException(409, "This discussion is locked.")
             comment_id = db.execute("""
                 INSERT INTO comments (thread_id, author, body, created_at) VALUES (?, ?, ?, ?) RETURNING id
             """, (thread_id, handle, data.body, int(clock()))).fetchone()["id"]
             log(db, "comment", "Commented on a discussion.", handle, target["goal_id"])
         return comment(comment_id)
+
+    def opaque_item(db, kind, item_id):
+        if kind not in KINDS:
+            raise HTTPException(404, "Unknown content type.")
+        return require_row(db.execute(f"SELECT * FROM {kind} WHERE id = ?", (item_id,)).fetchone(), "Content")
+
+    def report_content(kind, item_id, data, handle):
+        with connect(engine, write=True) as db:
+            item = opaque_item(db, kind, item_id)
+            if item["visibility"] != "approved":
+                raise HTTPException(404, "Content not found.")
+            result = db.execute("""
+                INSERT INTO reports (kind, item_id, reporter, reason, created_at)
+                VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING id
+            """, (kind, item_id, handle, data.reason, int(clock()))).fetchone()
+            if result is None:
+                raise HTTPException(409, "You already reported this item.")
+            return {"id": result["id"]}
+
+    def reset_claim(db, task_id):
+        return db.execute("""
+            UPDATE tasks SET status = 'open', claimant = NULL, lease_until = NULL,
+                last_heartbeat = NULL, claimed_at = NULL
+            WHERE id = ? AND status = 'claimed' RETURNING goal_id
+        """, (task_id,)).fetchone()
+
+    def release(task_id, handle):
+        with connect(engine, write=True) as db:
+            item = opaque_item(db, "tasks", task_id)
+            if item["claimant"] != handle or item["status"] != "claimed":
+                raise HTTPException(409, "Only the active claimant can release this claim.")
+            changed = db.execute("""
+                UPDATE tasks SET status = 'open', claimant = NULL, lease_until = NULL,
+                    last_heartbeat = NULL, claimed_at = NULL
+                WHERE id = ? AND status = 'claimed' AND claimant = ? RETURNING goal_id
+            """, (task_id, handle)).fetchone()
+            if changed is None:
+                raise HTTPException(409, "Only the active claimant can release this claim.")
+            db.execute("DELETE FROM path_leases WHERE task_id = ?", (task_id,))
+            log(db, "released", "Released a task claim.", handle, changed["goal_id"], task_id)
+        return task(task_id, any_visibility=True)
+
+    def moderate(kind, item_id, data, handle):
+        with connect(engine, write=True) as db:
+            item = opaque_item(db, kind, item_id)
+            staff = role_in(db, handle) in {"admin", "moderator"}
+            goal_id = item_id if kind == "goals" else item.get("goal_id")
+            if not staff:
+                if data.action != "approve" or kind != "tasks" or opaque_item(db, "goals", goal_id)["author"] != handle:
+                    raise HTTPException(403, "Moderator permission required.")
+            if data.action in {"approve", "reject", "hide", "delete"}:
+                statuses = {"approve": "approved", "reject": "rejected", "hide": "hidden", "delete": "deleted"}
+                if item["visibility"] == "deleted":
+                    raise HTTPException(409, "Deleted content cannot be restored.")
+                if data.action == "approve" and not staff and item["visibility"] != "pending":
+                    raise HTTPException(403, "Only moderators can restore removed content.")
+                db.execute(f"UPDATE {kind} SET visibility = ? WHERE id = ?", (statuses[data.action], item_id))
+                if data.action != "approve":
+                    if kind == "tasks":
+                        reset_claim(db, item_id)
+                    elif kind == "goals":
+                        for row in db.execute("SELECT id FROM tasks WHERE goal_id = ? AND status = 'claimed'", (item_id,)):
+                            reset_claim(db, row["id"])
+            elif data.action in {"lock", "unlock"} and kind == "threads":
+                db.execute("UPDATE threads SET locked = ? WHERE id = ?", (int(data.action == "lock"), item_id))
+            elif data.action == "release" and kind == "tasks":
+                if reset_claim(db, item_id) is None:
+                    raise HTTPException(409, "Task is not claimed.")
+                db.execute("DELETE FROM path_leases WHERE task_id = ?", (item_id,))
+            elif data.action == "reject_submission" and kind == "tasks":
+                changed = db.execute("""
+                    UPDATE tasks SET status = 'open', claimant = NULL, claimed_at = NULL,
+                        pr_url = NULL, summary = NULL, pr_check = NULL WHERE id = ? AND status = 'submitted'
+                """, (item_id,))
+                if not changed.rowcount:
+                    raise HTTPException(409, "Task is not submitted.")
+                db.execute("DELETE FROM handoffs WHERE task_id = ?", (item_id,))
+                db.execute("DELETE FROM reviews WHERE task_id = ?", (item_id,))
+            else:
+                raise HTTPException(422, "Action does not apply to this item.")
+            db.execute("UPDATE reports SET resolved = 1 WHERE kind = ? AND item_id = ?", (kind, item_id))
+            db.execute("INSERT INTO moderation_audit VALUES (?, ?, ?, ?, ?)",
+                       (handle, data.action, f"{kind}/{item_id}", data.reason, int(clock())))
+            log(db, "moderated", f"Moderation: {data.action} {kind} #{item_id}.", handle, goal_id,
+                item_id if kind == "tasks" else None)
+            return {"ok": True}
+
+    def moderation_queue(handle):
+        staff = moderator(handle)
+        with connect(engine) as db:
+            goal_sql = "SELECT id, title, author FROM goals WHERE visibility = 'pending'"
+            task_sql = """
+                SELECT t.id, t.goal_id, t.title, t.author FROM tasks t JOIN goals g ON t.goal_id = g.id
+                WHERE t.visibility = 'pending'
+            """
+            goals_pending = [dict(row) for row in db.execute(
+                goal_sql + (" ORDER BY id DESC LIMIT 100" if staff else " AND author = ? ORDER BY id DESC LIMIT 100"),
+                () if staff else (handle,),
+            )]
+            tasks_pending = [dict(row) for row in db.execute(
+                task_sql + (" ORDER BY t.id DESC LIMIT 100" if staff else " AND (t.author = ? OR g.author = ?) ORDER BY t.id DESC LIMIT 100"),
+                () if staff else (handle, handle),
+            )]
+            reports = [dict(row) for row in db.execute("""
+                SELECT * FROM reports WHERE resolved = 0 ORDER BY id DESC LIMIT 100
+            """)] if staff else []
+            return {"goals": goals_pending, "tasks": tasks_pending, "reports": reports, "moderator": staff}
+
+    def set_role(target, data, handle):
+        with connect(engine, write=True) as db:
+            if role_in(db, handle) != "admin":
+                raise HTTPException(403, "Admin permission required.")
+            changed = db.execute("""
+                UPDATE contributors SET role = ? WHERE handle = ? AND role <> 'admin'
+            """, (data.role, target))
+            if not changed.rowcount:
+                raise HTTPException(404, "Manageable account not found.")
+        return {"ok": True}
+
+    def ban(target, handle, data):
+        with connect(engine, write=True) as db:
+            if role_in(db, handle) not in {"admin", "moderator"}:
+                raise HTTPException(403, "Moderator permission required.")
+            result = db.execute("UPDATE contributors SET banned = 1 WHERE handle = ? AND role = 'contributor'", (target,))
+            if not result.rowcount:
+                raise HTTPException(404, "Manageable contributor not found.")
+            db.execute("DELETE FROM sessions WHERE handle = ?", (target,))
+            for table in ("goals", "tasks", "threads", "comments", "notes"):
+                db.execute(f"UPDATE {table} SET visibility = 'hidden' WHERE author = ? AND visibility <> 'deleted'", (target,))
+            for item in db.execute("""
+                SELECT id FROM tasks WHERE status = 'claimed' AND (claimant = ? OR visibility = 'hidden'
+                    OR EXISTS (SELECT 1 FROM goals WHERE goals.id = tasks.goal_id AND visibility = 'hidden'))
+            """, (target,)):
+                reset_claim(db, item["id"])
+            for table in ("goal_votes", "task_votes", "thread_votes", "comment_votes"):
+                db.execute(f"DELETE FROM {table} WHERE handle = ?", (target,))
+            db.execute("INSERT INTO moderation_audit VALUES (?, ?, ?, ?, ?)",
+                       (handle, "ban", target, data.reason, int(clock())))
+            log(db, "moderated", "Suspended a contributor.", handle)
+        return {"ok": True}
 
     @api.post("/auth/register", status_code=201)
     def api_register(data: AccountInput, request: Request, response: Response):
@@ -571,13 +888,16 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return identity
 
     @api.post("/auth/logout")
-    def api_logout(request: Request, response: Response):
+    def api_logout(request: Request, response: Response, _handle: str = auth):
         logout(request, response)
         return {"ok": True}
 
-    @api.get("/auth/github")
+    github_configured = bool(os.environ.get("GITHUB_OAUTH_CLIENT_ID") and os.environ.get("GITHUB_OAUTH_CLIENT_SECRET"))
+
+    @api.get("/auth/github", include_in_schema=github_configured, deprecated=True,
+             summary="Reserved: GitHub OAuth is not implemented")
     def api_github():
-        if not (os.environ.get("GITHUB_OAUTH_CLIENT_ID") and os.environ.get("GITHUB_OAUTH_CLIENT_SECRET")):
+        if not github_configured:
             raise HTTPException(404, "GitHub OAuth is not configured.")
         raise HTTPException(501, "GitHub OAuth is planned but not implemented.")
 
@@ -586,32 +906,32 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return signup(data.handle)
 
     @api.get("/me")
-    def api_me(request: Request):
-        return {"handle": contributor(request)}
+    def api_me(handle: str = auth):
+        return {"handle": handle}
 
-    @api.get("/goals")
+    @api.get("/goals", response_model=list[GoalResponse])
     def api_goals():
         return goals()
 
-    @api.post("/goals", status_code=201)
-    def api_add_goal(data: GoalInput, request: Request):
-        return add_goal(data, contributor(request))
+    @api.post("/goals", status_code=201, response_model=GoalResponse)
+    def api_add_goal(data: GoalInput, handle: str = auth):
+        return add_goal(data, handle)
 
-    @api.get("/goals/featured")
+    @api.get("/goals/featured", response_model=GoalResponse | None)
     def api_featured():
         return featured()
 
-    @api.get("/goals/{goal_id}")
-    def api_goal(goal_id: int):
-        return goal(goal_id)
+    @api.get("/goals/{goal_id}", response_model=GoalResponse)
+    def api_goal(goal_id: int, request: Request):
+        return goal(goal_id, viewer(request))
 
-    @api.get("/goals/{goal_id}/progress")
+    @api.get("/goals/{goal_id}/progress", response_model=ProgressResponse)
     def api_progress(goal_id: int):
         return goal(goal_id)["progress"]
 
     @api.post("/goals/{goal_id}/tasks", status_code=201)
-    def api_add_task(goal_id: int, data: TaskInput, request: Request):
-        return add_task(goal_id, data, contributor(request))
+    def api_add_task(goal_id: int, data: TaskInput, handle: str = auth):
+        return add_task(goal_id, data, handle)
 
     @api.get("/tasks")
     def api_tasks(goal_id: int | None = None, available: bool = False):
@@ -620,66 +940,74 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return tasks(goal_id, available)
 
     @api.get("/tasks/{task_id}")
-    def api_task(task_id: int):
-        return task(task_id)
+    def api_task(task_id: int, request: Request):
+        return task(task_id, viewer(request))
 
     @api.post("/{kind}/{item_id}/vote")
-    def api_vote(kind: Literal["goals", "tasks", "threads", "comments"], item_id: int, request: Request):
-        return vote(kind, item_id, contributor(request))
+    def api_vote(kind: Literal["goals", "tasks", "threads", "comments"], item_id: int, handle: str = auth):
+        return vote(kind, item_id, handle)
+
+    @api.delete("/{kind}/{item_id}/vote")
+    def api_unvote(kind: Literal["goals", "tasks", "threads", "comments"], item_id: int, handle: str = auth):
+        return vote(kind, item_id, handle, remove=True)
 
     @api.post("/tasks/{task_id}/claim")
-    def api_claim(task_id: int, request: Request):
-        return claim(task_id, contributor(request))
+    def api_claim(task_id: int, handle: str = auth):
+        return claim(task_id, handle)
+
+    @api.post("/tasks/{task_id}/release")
+    def api_release(task_id: int, handle: str = auth):
+        return release(task_id, handle)
 
     @api.post("/tasks/{task_id}/heartbeat")
-    def api_heartbeat(task_id: int, request: Request):
-        return heartbeat(task_id, contributor(request))
+    def api_heartbeat(task_id: int, handle: str = auth):
+        return heartbeat(task_id, handle)
 
-    @api.post("/tasks/{task_id}/events", status_code=201)
-    def api_run_event(task_id: int, data: EventInput, request: Request):
-        return run_event(task_id, data, contributor(request))
+    @api.post("/tasks/{task_id}/events", status_code=201, response_model=EventResponse)
+    def api_run_event(task_id: int, data: EventInput, handle: str = auth):
+        return run_event(task_id, data, handle)
 
     @api.post("/tasks/{task_id}/submit")
-    def api_submit(task_id: int, data: Submission, request: Request):
-        return submit(task_id, data, contributor(request))
+    def api_submit(task_id: int, data: Submission, handle: str = auth):
+        return submit(task_id, data, handle)
 
     @api.post("/tasks/{task_id}/done")
-    def api_done(task_id: int, request: Request):
-        return done(task_id, contributor(request))
+    def api_done(task_id: int, handle: str = auth):
+        return done(task_id, handle)
 
     @api.post("/tasks/{task_id}/reviews", status_code=201)
-    def api_review(task_id: int, data: ReviewInput, request: Request):
-        return review_task(task_id, data, contributor(request))
+    def api_review(task_id: int, data: ReviewInput, handle: str = auth):
+        return review_task(task_id, data, handle)
 
     @api.post("/tasks/{task_id}/path-leases", status_code=201)
-    def api_lease(task_id: int, data: PathLeaseInput, request: Request):
-        return reserve_path(task_id, data, contributor(request))
+    def api_lease(task_id: int, data: PathLeaseInput, handle: str = auth):
+        return reserve_path(task_id, data, handle)
 
     @api.post("/tasks/{task_id}/paths/check")
-    def api_check(task_id: int, data: PathCheckInput, request: Request):
-        return inspect_paths(task_id, data, contributor(request))
+    def api_check(task_id: int, data: PathCheckInput, handle: str = auth):
+        return inspect_paths(task_id, data, handle)
 
     @api.get("/goals/{goal_id}/notes")
     def api_notes(goal_id: int):
         return notes(goal_id)
 
     @api.post("/goals/{goal_id}/notes", status_code=201)
-    def api_note(goal_id: int, data: NoteInput, request: Request):
-        return post_note(goal_id, data, contributor(request))
+    def api_note(goal_id: int, data: NoteInput, handle: str = auth):
+        return post_note(goal_id, data, handle)
 
     @api.post("/tasks/{task_id}/subtasks", status_code=201)
-    def api_subtasks(task_id: int, data: SubtasksInput, request: Request):
-        return subtasks(task_id, data, contributor(request))
+    def api_subtasks(task_id: int, data: SubtasksInput, handle: str = auth):
+        return subtasks(task_id, data, handle)
 
     @api.get("/leaderboard")
     def api_leaders():
         return leaders()
 
     @api.get("/stats")
-    def api_stats():
-        return stats()
+    def api_stats(goal_id: int | None = None):
+        return stats(goal_id)
 
-    @api.get("/activity")
+    @api.get("/activity", response_model=list[EventResponse])
     def api_activity(limit: int = 20):
         return activity(max(1, min(limit, 100)))
 
@@ -705,26 +1033,55 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @api.get("/threads")
-    def api_threads(goal_id: int | None = None, general: bool = False):
-        return threads(goal_id, general)
+    def api_threads(goal_id: int | None = None, general: bool = False, page: int = 1, limit: int = 20):
+        return threads(goal_id, general, max(1, min(page, 10000)), max(1, min(limit, 50)))
 
     @api.post("/threads", status_code=201)
-    def api_add_thread(data: ThreadInput, request: Request):
-        return add_thread(data, contributor(request))
+    def api_add_thread(data: ThreadInput, handle: str = auth):
+        return add_thread(data, handle)
 
     @api.get("/threads/{thread_id}")
     def api_thread(thread_id: int):
         return thread(thread_id)
 
     @api.post("/threads/{thread_id}/comments", status_code=201)
-    def api_comment(thread_id: int, data: NoteInput, request: Request):
-        return add_comment(thread_id, data, contributor(request))
+    def api_comment(thread_id: int, data: NoteInput, handle: str = auth):
+        return add_comment(thread_id, data, handle)
+
+    @api.post("/{kind}/{item_id}/report", status_code=201)
+    def api_report(kind: Kind, item_id: int, data: ReportInput, handle: str = auth):
+        return report_content(kind, item_id, data, handle)
+
+    @api.get("/moderation/queue")
+    def api_moderation_queue(handle: str = auth):
+        return moderation_queue(handle)
+
+    @api.post("/moderation/{kind}/{item_id}")
+    def api_moderate(kind: Kind, item_id: int, data: ModerationInput, handle: str = auth):
+        return moderate(kind, item_id, data, handle)
+
+    @api.post("/moderation/contributors/{target}/role")
+    def api_role(target: str, data: RoleInput, handle: str = auth):
+        return set_role(target, data, handle)
+
+    @api.post("/moderation/contributors/{target}/ban")
+    def api_ban(target: str, data: ReportInput, handle: str = auth):
+        return ban(target, handle, data)
 
     app.include_router(api)
 
+    def vote_state(handle):
+        if not handle:
+            return {}
+        with connect(engine) as db:
+            return {kind: {row["id"] for row in db.execute(
+                f"SELECT {kind[:-1]}_id AS id FROM {kind[:-1]}_votes WHERE handle = ?", (handle,),
+            )} for kind in ("goals", "tasks", "threads", "comments")}
+
     def page(request, template, *, status_code=200, **context):
+        handle = viewer(request, web=True)
         return templates.TemplateResponse(
-            request=request, name=template, context={"viewer": viewer(request, web=True), **context},
+            request=request, name=template, context={"viewer": handle, "my_votes": vote_state(handle), **context},
             status_code=status_code,
         )
 
@@ -735,18 +1092,36 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return page(request, "home.html", goals=items, featured=current, stats=stats(),
                     open_count=sum(item["progress"]["open"] for item in items))
 
+    def render_goal(goal_id, request, **context):
+        handle = viewer(request, web=True)
+        target = goal(goal_id, handle)
+        live = target["visibility"] == "approved"
+        return page(request, "goal.html", goal=target, tasks=tasks(goal_id, handle=handle),
+                    notes=notes(goal_id) if live else [], threads=threads(goal_id) if live else [],
+                    can_approve=bool(handle and (target["author"] == handle or moderator(handle))), **context)
+
     @app.get("/goals/{goal_id}")
     def goal_page(goal_id: int, request: Request):
-        return page(request, "goal.html", goal=goal(goal_id), tasks=tasks(goal_id), notes=notes(goal_id),
-                    threads=threads(goal_id))
+        return render_goal(goal_id, request)
 
     @app.get("/leaderboard")
     def leaderboard(request: Request):
         return page(request, "leaderboard.html", leaders=leaders())
 
+    @app.get("/contribute")
+    def contribute(request: Request):
+        return page(request, "contribute.html")
+
+    def return_path(value):
+        if not isinstance(value, str) or not value.startswith("/") or value.startswith("//"):
+            return "/"
+        if len(value) > 1000 or "\\" in value or any(ord(symbol) < 32 for symbol in value):
+            return "/"
+        return value
+
     @app.get("/join")
-    def join_page(request: Request):
-        return page(request, "join.html")
+    def join_page(request: Request, next: str = "/"):
+        return page(request, "join.html", next_path=return_path(next))
 
     def redirect(url):
         return RedirectResponse(url, status_code=303)
@@ -754,13 +1129,24 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def web_origin(request):
         if request.headers.get("sec-fetch-site") == "cross-site":
             raise HTTPException(403, "Cross-site form submissions are not allowed.")
+        source = request.headers.get("origin") or request.headers.get("referer")
+        if source:
+            try:
+                incoming = urlsplit(source)
+                expected = urlsplit(os.environ.get("SWARM_PUBLIC_ORIGIN") or str(request.base_url))
+                if (incoming.scheme, incoming.netloc) == (expected.scheme, expected.netloc):
+                    return
+            except ValueError:
+                pass
+            raise HTTPException(403, "Cross-site form submissions are not allowed.")
 
     @app.post("/join")
     async def join(request: Request):
         web_origin(request)
         form = await request.form()
+        next_path = return_path(form.get("next"))
+        action = form.get("action") or "register"
         try:
-            action = form.get("action")
             if action == "token":
                 token = str(form.get("token", "")).strip()
                 handle = active_session(token)
@@ -774,8 +1160,9 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 )
         except (HTTPException, ValidationError) as exc:
             error = exc.detail if isinstance(exc, HTTPException) else "Enter a valid handle and a 12–128 character password."
-            return page(request, "join.html", status_code=400, error=error)
-        response = redirect("/")
+            return page(request, "join.html", status_code=400, error=error, error_action=action,
+                        username_draft=form.get("username", ""), next_path=next_path)
+        response = redirect(next_path)
         set_session(request, response, identity)
         return response
 
@@ -788,16 +1175,17 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
 
     @app.get("/propose")
     def propose(request: Request, goal_id: int | None = None, parent_id: int | None = None):
-        parent = task(parent_id) if parent_id is not None else None
-        target = goal(parent["goal_id"] if parent else goal_id) if parent or goal_id is not None else None
+        handle = viewer(request, web=True)
+        parent = task(parent_id, handle) if parent_id is not None else None
+        target = goal(parent["goal_id"] if parent else goal_id, handle) if parent or goal_id is not None else None
         return page(request, "propose.html", goal=target, parent=parent)
 
     @app.post("/propose")
     async def propose_post(request: Request, goal_id: int | None = None, parent_id: int | None = None):
         web_origin(request)
         handle = contributor(request, web=True)
-        parent = task(parent_id) if parent_id is not None else None
-        target = goal(parent["goal_id"] if parent else goal_id) if parent or goal_id is not None else None
+        parent = task(parent_id, handle) if parent_id is not None else None
+        target = goal(parent["goal_id"] if parent else goal_id, handle) if parent or goal_id is not None else None
         form = dict(await request.form())
         try:
             if parent:
@@ -814,9 +1202,9 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return redirect(f"/goals/{item['id']}")
 
     @app.post("/vote/{kind}/{item_id}")
-    def web_vote(kind: str, item_id: int, request: Request):
+    def web_vote(kind: str, item_id: int, request: Request, remove: bool = False):
         web_origin(request)
-        item = vote(kind, item_id, contributor(request, web=True))
+        item = vote(kind, item_id, contributor(request, web=True), remove=remove)
         if kind == "threads":
             return redirect(f"/forum/{item_id}")
         if kind == "comments":
@@ -829,16 +1217,24 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     async def web_note(goal_id: int, request: Request):
         web_origin(request)
         handle = contributor(request, web=True)
+        form = dict(await request.form())
         try:
-            post_note(goal_id, NoteInput.model_validate(dict(await request.form())), handle)
+            post_note(goal_id, NoteInput.model_validate(form), handle)
         except ValidationError:
-            raise HTTPException(422, "Notes must be 1–5000 characters.") from None
+            return render_goal(goal_id, request, status_code=422, note_error="Enter a note of 1–5000 characters.",
+                               note_draft=form.get("body", ""))
         return redirect(f"/goals/{goal_id}#scratchpad")
 
     @app.post("/tasks/{task_id}/done")
     def web_done(task_id: int, request: Request):
         web_origin(request)
         item = done(task_id, contributor(request, web=True))
+        return redirect(f"/goals/{item['goal_id']}#task-{task_id}")
+
+    @app.post("/tasks/{task_id}/release")
+    def web_release(task_id: int, request: Request):
+        web_origin(request)
+        item = release(task_id, contributor(request, web=True))
         return redirect(f"/goals/{item['goal_id']}#task-{task_id}")
 
     @app.post("/tasks/{task_id}/reviews")
@@ -852,9 +1248,11 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return redirect(f"/goals/{item['goal_id']}#task-{task_id}")
 
     @app.get("/forum")
-    def forum(request: Request, goal_id: int | None = None):
+    def forum(request: Request, goal_id: int | None = None, page_number: int = 1):
         target = goal(goal_id) if goal_id is not None else None
-        return page(request, "forum.html", threads=threads(goal_id, general=goal_id is None), goal=target)
+        page_number = max(1, min(page_number, 10000))
+        return page(request, "forum.html", threads=threads(goal_id, general=goal_id is None, page=page_number),
+                    goal=target, page_number=page_number)
 
     @app.post("/forum")
     async def web_thread(request: Request, goal_id: int | None = None):
@@ -864,7 +1262,10 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         try:
             item = add_thread(ThreadInput.model_validate({**form, "goal_id": goal_id}), handle)
         except ValidationError:
-            raise HTTPException(422, "Enter a title and discussion text.") from None
+            target = goal(goal_id) if goal_id is not None else None
+            return page(request, "forum.html", status_code=422, goal=target, page_number=1,
+                        threads=threads(goal_id, general=goal_id is None), error="Enter a title and discussion text.",
+                        draft_title=form.get("title", ""), draft_body=form.get("body", ""))
         return redirect(f"/forum/{item['id']}")
 
     @app.get("/forum/{thread_id}")
@@ -875,10 +1276,12 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     async def web_comment(thread_id: int, request: Request):
         web_origin(request)
         handle = contributor(request, web=True)
+        form = dict(await request.form())
         try:
-            item = add_comment(thread_id, NoteInput.model_validate(dict(await request.form())), handle)
+            item = add_comment(thread_id, NoteInput.model_validate(form), handle)
         except ValidationError:
-            raise HTTPException(422, "Comments must be 1–5000 characters.") from None
+            return page(request, "thread.html", status_code=422, thread=thread(thread_id),
+                        error="Enter a reply of 1–5000 characters.", draft_body=form.get("body", ""))
         return redirect(f"/forum/{thread_id}#comment-{item['id']}")
 
     @app.get("/watch")
@@ -886,7 +1289,48 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         target = goal(goal_id) if goal_id is not None else None
         items = activity(goal_id=goal_id)
         return page(request, "watch.html", goal=target, activity=items, cursor=items[0]["id"] if items else 0,
-                    stats=stats())
+                    stats=stats(goal_id))
+
+    @app.get("/moderation")
+    def moderation_page(request: Request):
+        handle = contributor(request, web=True)
+        return page(request, "moderation.html", queue=moderation_queue(handle), admin=role(handle) == "admin")
+
+    @app.get("/report/{kind}/{item_id}")
+    def report_page(kind: Kind, item_id: int, request: Request):
+        return page(request, "report.html", kind=kind, item_id=item_id)
+
+    @app.post("/report/{kind}/{item_id}")
+    async def web_report(kind: Kind, item_id: int, request: Request):
+        web_origin(request)
+        try:
+            data = ReportInput.model_validate(dict(await request.form()))
+        except ValidationError:
+            raise HTTPException(422, "Enter a report reason.") from None
+        report_content(kind, item_id, data, contributor(request, web=True))
+        return page(request, "report.html", kind=kind, item_id=item_id, submitted=True)
+
+    @app.post("/moderation/{kind}/{item_id}")
+    async def web_moderate(kind: Kind, item_id: int, request: Request):
+        web_origin(request)
+        try:
+            data = ModerationInput.model_validate(dict(await request.form()))
+        except ValidationError:
+            raise HTTPException(422, "Enter a moderation reason and choose an action.") from None
+        moderate(kind, item_id, data, contributor(request, web=True))
+        return redirect("/moderation")
+
+    @app.post("/moderation/ban")
+    async def web_ban(request: Request):
+        web_origin(request)
+        form = dict(await request.form())
+        try:
+            data = ReportInput.model_validate(form)
+            target = Signup(handle=form.get("target")).handle
+        except ValidationError:
+            raise HTTPException(422, "Enter a contributor handle and a reason.") from None
+        ban(target, contributor(request, web=True), data)
+        return redirect("/moderation")
 
     return app
 

@@ -8,7 +8,12 @@
   <p id="connection" class="meta">CONNECTING TO LIVE UPDATES</p>
   <ol id="activity" data-cursor="{{ cursor }}" data-goal="{{ goal.id if goal else '' }}">
     {% for event in activity %}
-    <li>@{{ event.actor }} · {{ event.summary }}{% if event.task_id %} <a href="/goals/{{ event.goal_id }}#task-{{ event.task_id }}">Task #{{ event.task_id }}</a>{% endif %}</li>
+    <li><span class="badge event-{{ event.kind }}">{{ event.kind }}</span>
+      <time class="meta" datetime="{{ event.created_at|utc }}">{{ event.created_at|utc }}</time>
+      {% if event.run_id %}<span class="meta" title="{{ event.run_id }}">Run {{ event.run_id[:8] }}</span>{% endif %}
+      <span>@{{ event.actor }} · {{ event.summary }}</span>
+      {% if event.task_id %}<a href="/goals/{{ event.goal_id }}#task-{{ event.task_id }}">Task #{{ event.task_id }}</a>{% endif %}
+    </li>
     {% endfor %}
   </ol>
 </section>

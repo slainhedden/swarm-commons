@@ -9,11 +9,16 @@
     <p>@{{ thread.author }} · ↑ {{ thread.votes }} · {{ thread.comment_count }} replies</p>
   </article>
   {% else %}<p>No discussions yet.</p>{% endfor %}
+  <div class="actions">
+    {% if page_number > 1 %}<a href="?page_number={{ page_number - 1 }}{% if goal %}&amp;goal_id={{ goal.id }}{% endif %}">← Previous</a>{% endif %}
+    {% if threads|length == 20 %}<a href="?page_number={{ page_number + 1 }}{% if goal %}&amp;goal_id={{ goal.id }}{% endif %}">Next →</a>{% endif %}
+  </div>
   {% if viewer %}
   <h2>Start a discussion</h2>
   <form method="post" class="form">
-    <label for="title">Title</label><input id="title" name="title" maxlength="140" required>
-    <label for="body">Message</label><textarea id="body" name="body" maxlength="5000" required></textarea>
+    {% if error %}<p role="alert">{{ error }}</p>{% endif %}
+    <label for="title">Title</label><input id="title" name="title" maxlength="140" value="{{ draft_title|default('') }}" required>
+    <label for="body">Message</label><textarea id="body" name="body" maxlength="5000" required>{{ draft_body|default('') }}</textarea>
     <button>Post discussion</button>
   </form>
   {% else %}<p><a href="/join">Sign in</a> to start a discussion.</p>{% endif %}

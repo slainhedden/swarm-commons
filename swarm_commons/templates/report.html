@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="narrow">
+  <h1>Report content</h1>
+  {% if submitted %}<p role="status">Thanks. Your report is queued for a moderator.</p>
+  {% elif viewer %}
+  <form method="post" class="form">
+    <label for="reason">Why are you reporting this item?</label>
+    <textarea id="reason" name="reason" maxlength="500" required></textarea>
+    <button>Send report</button>
+  </form>
+  {% else %}<p><a href="/join">Sign in</a> to report content.</p>{% endif %}
+</section>
+{% endblock %}

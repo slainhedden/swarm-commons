@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -121,11 +122,27 @@ def doctor():
         except (OSError, subprocess.TimeoutExpired):
             ready = False
         print(f"{name}: {'signed in' if ready else 'not signed in with a supported account'}")
+    try:
+        with Client.from_config() as client:
+            account = client.get("me")
+    except SwarmError as exc:
+        print(f"Swarm Commons: {exc}")
+    else:
+        print(f"Swarm Commons: signed in as @{account['handle']}")
+
+
+def preflight(agent, launcher):
+    if not shutil.which("git"):
+        raise SwarmError("git is not installed.")
+    if agent == "fake":
+        return
+    if launcher is None and not shutil.which(agent):
+        raise SwarmError(f"{agent} is not installed. Install the official CLI before running a task.")
+    if not signed_in(agent, launcher):
+        raise SwarmError(f"Sign into official {agent} with your own subscription account first (see swarm doctor).")
 
 
 def invoke_agent(agent, prompt, workspace, task_id, minutes, policy, launcher=None):
-    if agent != "fake" and ((launcher is None and not shutil.which(agent)) or not signed_in(agent, launcher)):
-        raise SwarmError(f"Sign into official {agent} with your own subscription account first (see swarm doctor).")
     swarm = shutil.which("swarm") or str(Path(sys.argv[0]).absolute())
     return run_provider(agent, prompt, workspace, task_id, minutes, policy, swarm, launcher)
 
@@ -148,7 +165,8 @@ def publish(workspace, repo, slug, branch, base_branch, task, summary):
 @contextmanager
 def report_run(client, task_id, agent):
     stop = threading.Event()
-    client.post(f"tasks/{task_id}/events", kind="started", summary=f"Started local {agent} run.")
+    run_id = uuid.uuid4().hex
+    client.post(f"tasks/{task_id}/events", kind="started", summary=f"Started local {agent} run.", run_id=run_id)
 
     def heartbeats():
         while not stop.wait(25):
@@ -161,7 +179,7 @@ def report_run(client, task_id, agent):
 
     def report(kind, message):
         try:
-            client.post(f"tasks/{task_id}/events", kind=kind, summary=message)
+            client.post(f"tasks/{task_id}/events", kind=kind, summary=message, run_id=run_id)
         except SwarmError:
             print("swarm: could not report run status.", file=sys.stderr)
 
@@ -169,10 +187,16 @@ def report_run(client, task_id, agent):
     worker.start()
     try:
         yield
-    except BaseException:
+    except BaseException as exc:
         stop.set()
         worker.join()
-        report("failed", "Local run ended before review.")
+        if isinstance(exc, KeyboardInterrupt):
+            reason = "Interrupted by contributor."
+        elif isinstance(exc, SwarmError) and str(exc).startswith("Stopped "):
+            reason = "Stopped at a configured local usage limit."
+        else:
+            reason = "Local agent did not finish successfully; see local CLI diagnostics."
+        report("failed", reason)
         raise
     else:
         stop.set()
@@ -210,12 +234,27 @@ def run_task(client, args):
     if not confirm("Claim this task and run the agent locally?"):
         print("Cancelled; no agent was run.")
         return
-    with usage_reservation(policy, args.budget_minutes):
-        client.post(f"tasks/{args.id}/claim")
-        workspace, base_branch, base, branch = make_workspace(repo, args.id)
-        print(f"Local worktree: {workspace}", flush=True)
-        with report_run(client, args.id, args.agent):
-            usage = invoke_agent(args.agent, prompt, workspace, args.id, args.budget_minutes, policy, launcher)
+    preflight(args.agent, launcher)
+    claimed, submitted = False, False
+    try:
+        with usage_reservation(policy, args.budget_minutes):
+            client.post(f"tasks/{args.id}/claim")
+            claimed = True
+            workspace, base_branch, base, branch = make_workspace(repo, args.id)
+            print(f"Local worktree: {workspace}", flush=True)
+            with report_run(client, args.id, args.agent):
+                usage = invoke_agent(args.agent, prompt, workspace, args.id, args.budget_minutes, policy, launcher)
+        submitted = review_and_submit(client, args, task, repo, slug, workspace, base_branch, base, branch, usage)
+    finally:
+        if claimed and not submitted:
+            try:
+                client.post(f"tasks/{args.id}/release")
+                print(f"Released task #{args.id}.")
+            except SwarmError as exc:
+                print(f"swarm: could not release task #{args.id}: {exc}", file=sys.stderr)
+
+
+def review_and_submit(client, args, task, repo, slug, workspace, base_branch, base, branch, usage):
     execute("git", "-c", "core.hooksPath=/dev/null", "add", "-A", cwd=workspace)
     paths = staged_paths(workspace, base)
     if not paths:
@@ -245,6 +284,7 @@ def run_task(client, args):
     handoff.diff_url = f"{pr}/files"
     client.post(f"tasks/{args.id}/submit", pr_url=pr, summary=summary, handoff=handoff.model_dump())
     print("Result reported to Swarm Commons.")
+    return True
 
 
 def main(argv=None):
@@ -260,6 +300,8 @@ def main(argv=None):
     task_list.add_argument("--goal", type=int)
     claim = commands.add_parser("claim", help="Reserve a selected task without running an agent")
     claim.add_argument("id", type=int)
+    released = commands.add_parser("release", help="Release your task claim without submitting")
+    released.add_argument("id", type=int)
     run = commands.add_parser("run", help="Review and run one selected task locally")
     run.add_argument("id", type=int)
     run.add_argument("--agent", choices=("claude", "codex", "fake"), default="claude")
@@ -304,6 +346,9 @@ def main(argv=None):
                 elif args.command == "claim":
                     client.post(f"tasks/{args.id}/claim")
                     print(f"Claimed task #{args.id}.")
+                elif args.command == "release":
+                    client.post(f"tasks/{args.id}/release")
+                    print(f"Released task #{args.id}.")
                 elif args.command == "reserve":
                     client.post(f"tasks/{args.id}/path-leases", path=args.path, mode=args.mode, ttl_seconds=args.ttl_seconds)
                     print(f"Reserved {args.path!r} for task #{args.id}.")

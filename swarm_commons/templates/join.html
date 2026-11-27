@@ -3,21 +3,25 @@
 <section class="narrow">
   <h1>Join the swarm</h1>
   <p>Your handle is public. Your Swarm contributor token is separate from your Claude Code, Codex and GitHub accounts.</p>
-  {% if error %}<p role="alert">{{ error }}</p>{% endif %}
+  <p>Choose a password of at least 12 characters.</p>
   {% for action, title in [('register', 'Create an account'), ('login', 'Sign in')] %}
   <h2>{{ title }}</h2>
+  {% if error and error_action == action %}<p role="alert">{{ error }}</p>{% endif %}
   <form method="post" class="form">
     <input type="hidden" name="action" value="{{ action }}">
+    <input type="hidden" name="next" value="{{ next_path }}">
     <label for="username-{{ action }}">Username</label>
-    <input id="username-{{ action }}" name="username" minlength="2" maxlength="39" pattern="[a-z0-9][a-z0-9_\-]{1,38}" autocapitalize="none" autocomplete="username" required>
+    <input id="username-{{ action }}" name="username" minlength="2" maxlength="39" pattern="[a-z0-9][a-z0-9_\-]{1,38}" autocapitalize="none" autocomplete="username" value="{{ username_draft if error_action == action else '' }}" required>
     <label for="password-{{ action }}">Password</label>
-    <input id="password-{{ action }}" name="password" type="password" minlength="12" maxlength="128" autocomplete="{{ 'new-password' if action == 'register' else 'current-password' }}" required>
+    <input id="password-{{ action }}" name="password" type="password" minlength="12" maxlength="128" autocomplete="{{ 'new-password' if action == 'register' else 'current-password' }}" {% if error and error_action == action %}autofocus{% endif %} required>
     <button>{{ title }}</button>
   </form>
   {% endfor %}
   <h2>Joined from the CLI?</h2>
+  {% if error and error_action == 'token' %}<p role="alert">{{ error }}</p>{% endif %}
   <form method="post" class="form">
     <input type="hidden" name="action" value="token">
+    <input type="hidden" name="next" value="{{ next_path }}">
     <label for="token">Swarm contributor token</label><input id="token" name="token" type="password" required>
     <button class="secondary">Sign in</button>
   </form>

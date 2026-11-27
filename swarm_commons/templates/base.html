@@ -10,8 +10,9 @@
 <header>
   <nav aria-label="Main navigation">
     <a class="brand" href="/"><span aria-hidden="true">✳</span> Swarm Commons</a>
-    <a href="/">Explore</a><a href="/forum">Forum</a><a href="/watch">Watch</a><a href="/leaderboard">Leaderboard</a>
+    <a href="/">Explore</a><a href="/forum">Forum</a><a href="/watch">Watch</a><a href="/leaderboard">Leaderboard</a><a href="/contribute">How to contribute</a>
     {% if viewer %}
+    <a href="/moderation">Proposals &amp; moderation</a>
     <form action="/sign-out" method="post"><button class="quiet">Sign out @{{ viewer }}</button></form>
     {% else %}<a href="/join">Join swarm</a>{% endif %}
   </nav>
