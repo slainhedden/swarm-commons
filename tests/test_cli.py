@@ -136,9 +136,11 @@ def test_mcp_tools_coordinate_with_the_api(tmp_path):
                 {"title": "Follow-up", "description": "Check the result", "criteria": "Verify setup"},
             ]})
             await mcp.call_tool("submit_result", {"id": task["id"], "pr_url": "https://github.com/example/docs/pull/1",
-                                                  "summary": "MCP reports an existing PR"})
+                                                  "summary": "MCP reports an existing PR",
+                                                  "tests": [{"command": "pytest", "outcome": "passed"}]})
 
         asyncio.run(exercise())
         assert client.get(f"goals/{goal['id']}/notes")[0]["body"] == "Finding from MCP"
         assert client.get("tasks", available=True) == []
         assert client.get(f"tasks/{task['id']}")["status"] == "submitted"
+        assert client.get(f"tasks/{task['id']}")["handoff"]["tests"] == [{"command": "pytest", "outcome": "passed"}]
