@@ -62,6 +62,18 @@ export function connectedGoals(payload) {
   }));
 }
 
+export function canApproveProposal(kind, item, moderator, goals, handle) {
+  if (moderator) return true;
+  return (
+    Boolean(handle) &&
+    kind === "tasks" &&
+    goals.some(
+      (goal) =>
+        String(goal.id) === String(item.goal_id) && goal.author === handle,
+    )
+  );
+}
+
 export function safeUrl(value, fallback = "#") {
   try {
     const url = new URL(value);

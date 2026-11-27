@@ -1,6 +1,31 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { connectedGoals, request, safeUrl } from "../src/client.js";
+import {
+  canApproveProposal,
+  connectedGoals,
+  request,
+  safeUrl,
+} from "../src/client.js";
+
+test("only moderators or the task's goal owner can approve pending proposals", () => {
+  const goals = [{ id: "7", author: "owner" }];
+  const task = { goal_id: 7, author: "contributor" };
+  assert.equal(
+    canApproveProposal("tasks", task, false, goals, "contributor"),
+    false,
+  );
+  assert.equal(canApproveProposal("tasks", task, false, goals, "owner"), true);
+  assert.equal(
+    canApproveProposal("goals", { author: "owner" }, false, goals, "owner"),
+    false,
+  );
+  assert.equal(canApproveProposal("tasks", task, true, [], "moderator"), true);
+  assert.equal(canApproveProposal("goals", {}, true, [], "moderator"), true);
+  assert.equal(
+    canApproveProposal("tasks", task, false, goals, undefined),
+    false,
+  );
+});
 
 test("connected goals retain server vote identity and live progress", () => {
   const result = connectedGoals([

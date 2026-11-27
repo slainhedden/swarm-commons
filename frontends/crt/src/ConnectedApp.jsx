@@ -1,6 +1,11 @@
 import React, { useEffect, useRef, useState } from "react";
 import { API_BASE } from "./api.js";
-import { connectedGoals, request, safeUrl } from "./client.js";
+import {
+  canApproveProposal,
+  connectedGoals,
+  request,
+  safeUrl,
+} from "./client.js";
 
 const REPO = "https://github.com/slainhedden/swarm-commons";
 const list = (value) => {
@@ -94,7 +99,13 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
   useEffect(() => {
     if (offline) return;
     let active = true;
-    const load = async (key, route, setter, empty, transform = (value) => value) => {
+    const load = async (
+      key,
+      route,
+      setter,
+      empty,
+      transform = (value) => value,
+    ) => {
       try {
         const value = transform(await request(route));
         if (active) {
@@ -112,7 +123,13 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
     setTasks([]);
     load("stats", `/stats${scope}`, setStats, null);
     load("tasks", `/tasks${scope}`, setTasks, []);
-    load("activity", `/activity${scope}${scope ? "&" : "?"}limit=50`, setActivity, [], list);
+    load(
+      "activity",
+      `/activity${scope}${scope ? "&" : "?"}limit=50`,
+      setActivity,
+      [],
+      list,
+    );
     return () => {
       active = false;
     };
@@ -1364,7 +1381,10 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
                             body,
                           });
                           setThread(await request(`/threads/${thread.id}`));
-                          setReplyDrafts((old) => ({ ...old, [thread.id]: "" }));
+                          setReplyDrafts((old) => ({
+                            ...old,
+                            [thread.id]: "",
+                          }));
                         }, "Reply published on the server.");
                     }}
                   >
@@ -1381,10 +1401,18 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
                       value={replyDrafts[thread.id] || ""}
                       onChange={(event) => {
                         const value = event.target.value;
-                        setReplyDrafts((old) => ({ ...old, [thread.id]: value }));
+                        setReplyDrafts((old) => ({
+                          ...old,
+                          [thread.id]: value,
+                        }));
                       }}
                     />
-                    {!user && <p className="tiny muted">Sign in to publish. Your draft stays in this tab; reopen this discussion after signing in.</p>}
+                    {!user && (
+                      <p className="tiny muted">
+                        Sign in to publish. Your draft stays in this tab; reopen
+                        this discussion after signing in.
+                      </p>
+                    )}
                     <button disabled={busy} className="primary">
                       send reply →
                     </button>
@@ -1410,7 +1438,13 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
                         <p>
                           #{item.id} {item.title} · {item.author} · PENDING
                         </p>
-                        {(moderation.moderator || kind === "tasks") && (
+                        {canApproveProposal(
+                          kind,
+                          item,
+                          moderation.moderator,
+                          goals,
+                          user?.handle,
+                        ) && (
                           <button
                             disabled={busy}
                             className="text-link"
