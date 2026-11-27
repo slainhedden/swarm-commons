@@ -82,7 +82,6 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
       load("goals", "/goals", setGoals, connectedGoals),
       load("me", "/me", setUser),
       load("threads", "/threads?limit=50", setThreads, list),
-      load("activity", "/activity?limit=50", setActivity, list),
     ]).then(() => {
       if (active) setReady(true);
     });
@@ -94,9 +93,9 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
   useEffect(() => {
     if (offline) return;
     let active = true;
-    const load = async (key, route, setter, empty) => {
+    const load = async (key, route, setter, empty, transform = (value) => value) => {
       try {
-        const value = await request(route);
+        const value = transform(await request(route));
         if (active) {
           setter(value);
           setErrors((old) => ({ ...old, [key]: "" }));
@@ -112,6 +111,7 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
     setTasks([]);
     load("stats", `/stats${scope}`, setStats, null);
     load("tasks", `/tasks${scope}`, setTasks, []);
+    load("activity", `/activity${scope}${scope ? "&" : "?"}limit=50`, setActivity, [], list);
     return () => {
       active = false;
     };
