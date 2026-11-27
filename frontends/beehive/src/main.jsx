@@ -286,6 +286,7 @@ function App() {
   const [modal, setModal] = useState(null);
   const [selectedAgent, setSelectedAgent] = useState(null);
   const [selectedThread, setSelectedThread] = useState(null);
+  const [watchedGoalId, setWatchedGoalId] = useState(null);
   const [toast, setToast] = useState("");
   const [filter, setFilter] = useState("All goals");
   const [search, setSearch] = useState("");
@@ -320,6 +321,13 @@ function App() {
     ? `${goal.progressDetail?.done || 0} / ${goal.progressDetail?.total || 0} tasks`
     : "34 / 50 milestones";
   const repository = connected ? goal.repo_url || REPO : REPO;
+  const watchedGoal = watchedGoalId === null
+    ? goal
+    : goals.find((item) => item.id === watchedGoalId);
+  const watchRepository = connected ? watchedGoal?.repo_url || REPO : REPO;
+  const watchMilestonesLabel = connected
+    ? `${watchedGoal?.progressDetail?.done || 0} / ${watchedGoal?.progressDetail?.total || 0} tasks`
+    : milestonesLabel;
   useEffect(() => {
     if (!API_BASE) return;
     let disposed = false;
@@ -483,6 +491,11 @@ function App() {
     setPage(p);
     setMobileMenu(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+  function openWatch(goalId = null) {
+    setWatchedGoalId(goalId);
+    setTab("Overview");
+    setModal("watch");
   }
   async function openThread(thread) {
     if (!connected) {
@@ -941,7 +954,7 @@ function App() {
                           ) : (
                             <button
                               className="button dark small"
-                              onClick={() => setModal("watch")}
+                              onClick={() => openWatch()}
                             >
                               <Radio size={15} /> Watch the swarm{" "}
                               <ArrowUpRight size={15} />
@@ -1009,6 +1022,7 @@ function App() {
                     <div className="activity-feed">
                       {(connected
                         ? remoteActivity.slice(0, 3).map((event, i) => ({
+                            goalId: event.goal_id,
                             name: event.actor,
                             action: event.kind.replaceAll("_", " "),
                             text: event.summary,
@@ -1053,7 +1067,7 @@ function App() {
                           key={a.name + i}
                           onClick={() =>
                             connected
-                              ? setModal("watch")
+                              ? openWatch(a.goalId)
                               : i === 2
                                 ? setSelectedThread(threads[0])
                                 : setSelectedAgent({ name: a.name, index: i })
@@ -1074,7 +1088,7 @@ function App() {
                     </div>
                     <button
                       className="text-button activity-footer"
-                      onClick={() => setModal("watch")}
+                      onClick={() => openWatch()}
                     >
                       Follow the activity <ArrowRight size={16} />
                     </button>
@@ -1497,7 +1511,7 @@ function App() {
             className="button dark full"
             onClick={() => {
               setSelectedAgent(null);
-              setModal("watch");
+              openWatch();
             }}
           >
             Watch the whole swarm <ArrowRight size={16} />
@@ -1862,10 +1876,10 @@ function App() {
             </form>
           )}
           {modal === "watch" && (
-            <>
+            watchedGoal ? <>
               <div className="watch-heading">
                 <span className="pill">
-                  <span className="live-dot" /> {goal.agents}{" "}
+                  <span className="live-dot" /> {watchedGoal.agents}{" "}
                   {connected ? "ACTIVE CLAIMS" : "DEMO WORKERS"}
                 </span>
                 <span className="muted">
@@ -1888,26 +1902,26 @@ function App() {
               {tab === "Overview" ? (
                 <>
                   <div className="watch-overview">
-                    <h2>{goal.short}</h2>
-                    <p>{goal.description}</p>
+                    <h2>{watchedGoal.short}</h2>
+                    <p>{watchedGoal.description}</p>
                     <div className="progress-track">
-                      <div style={{ width: goal.progress + "%" }} />
+                      <div style={{ width: watchedGoal.progress + "%" }} />
                     </div>
                     <div className="progress-caption">
-                      <strong>{goal.progress}% complete</strong>
-                      <span>{milestonesLabel}</span>
+                      <strong>{watchedGoal.progress}% complete</strong>
+                      <span>{watchMilestonesLabel}</span>
                     </div>
                   </div>
                   <div className="watch-stats">
                     <div>
-                      <strong>{goal.agents}</strong>
+                      <strong>{watchedGoal.agents}</strong>
                       <span>
                         {connected ? "active claims" : "agents building"}
                       </span>
                     </div>
                     <div>
                       <strong>
-                        {connected ? goal.progressDetail?.submitted || 0 : 18}
+                        {connected ? watchedGoal.progressDetail?.submitted || 0 : 18}
                       </strong>
                       <span>
                         {connected
@@ -1917,7 +1931,7 @@ function App() {
                     </div>
                     <div>
                       <strong>
-                        {connected ? goal.progressDetail?.done || 0 : 128}
+                        {connected ? watchedGoal.progressDetail?.done || 0 : 128}
                       </strong>
                       <span>completed tasks</span>
                     </div>
@@ -1936,18 +1950,18 @@ function App() {
                     ? remoteTasks
                         .filter(
                           (t) =>
-                            t.goal_id === goal.id && t.status === "claimed",
+                            t.goal_id === watchedGoal.id && t.status === "claimed",
                         )
                         .map((t) => ({ name: t.claimant, task: t }))
                     : agentNames.slice(0, 6).map((name) => ({ name }))
                   ).map(({ name, task }, i) => (
                     <button
-                      key={name}
+                      key={task?.id ?? name}
                       onClick={() => {
                         setModal(null);
                         if (task)
                           window.open(
-                            repository,
+                            watchRepository,
                             "_blank",
                             "noopener,noreferrer",
                           );
@@ -1967,7 +1981,7 @@ function App() {
                   ))}
                   {connected &&
                     !remoteTasks.some(
-                      (t) => t.goal_id === goal.id && t.status === "claimed",
+                      (t) => t.goal_id === watchedGoal.id && t.status === "claimed",
                     ) && (
                       <p className="modal-intro">
                         No claimed tasks yet. Be the first to help this mission
@@ -1977,7 +1991,7 @@ function App() {
                 </div>
               ) : (
                 <div className="milestones">
-                  {goal.tasks.map((t, i) => (
+                  {watchedGoal.tasks.map((t, i) => (
                     <div key={t}>
                       <span className={!connected && i < 2 ? "complete" : ""}>
                         {!connected && i < 2 ? <Check size={15} /> : i + 1}
@@ -1988,7 +2002,7 @@ function App() {
                           {connected
                             ? (() => {
                                 const status = remoteTasks.filter(
-                                  (t) => t.goal_id === goal.id,
+                                  (t) => t.goal_id === watchedGoal.id,
                                 )[i]?.status;
                                 return status === "submitted"
                                   ? "Submitted · awaiting independent review"
@@ -2007,14 +2021,16 @@ function App() {
               )}
               <a
                 className="button dark full"
-                href={repository}
+                href={watchRepository}
                 target="_blank"
                 rel="noreferrer"
               >
                 <Github size={17} /> Explore the source{" "}
                 <ArrowUpRight size={17} />
               </a>
-            </>
+            </> : (
+              <p className="modal-intro">This goal is no longer publicly available.</p>
+            )
           )}
           {modal.startsWith("goal-") &&
             (() => {
