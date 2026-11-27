@@ -1,9 +1,3 @@
- const [discussionGoal,setDiscussionGoal]=useState<Goal|null>(null);
- const [threadPage,setThreadPage]=useState(1);
- const [hasMoreThreads,setHasMoreThreads]=useState(false);
- const [threadsLoading,setThreadsLoading]=useState(false);
- const [threadsError,setThreadsError]=useState('');
- const [threadRevision,setThreadRevision]=useState(0);
 import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ArrowUpRight, ArrowRight, ArrowUp, Check, ChevronDown, Copy, ExternalLink, GitBranch, GitPullRequest, Globe2, Hexagon, MessageCircle, Radio, Search, Terminal, Users, X } from 'lucide-react';
@@ -68,6 +62,12 @@ function App(){
  const [apiState,setApiState]=useState<'demo'|'unavailable'|'connected'>('demo');
  const [remoteGoals,setRemoteGoals]=useState<Goal[]|null>(null);
  const [remotePosts,setRemotePosts]=useState<Post[]>([]);
+ const [discussionGoal,setDiscussionGoal]=useState<Goal|null>(null);
+ const [threadPage,setThreadPage]=useState(1);
+ const [hasMoreThreads,setHasMoreThreads]=useState(false);
+ const [threadsLoading,setThreadsLoading]=useState(false);
+ const [threadsError,setThreadsError]=useState('');
+ const [threadRevision,setThreadRevision]=useState(0);
  const [liveGoal,setLiveGoal]=useState<{id:string;title:string;description:string;votes:number;repo:string;progress:number}|null>(null);
  const [liveStats,setLiveStats]=useState({agents_running:0,prs_merged:0,contributors:0});
  const dialogRef=useRef<HTMLDialogElement>(null);
@@ -84,6 +84,7 @@ function App(){
   setRemoteGoals(goals.map(g=>({id:String(g.id),title:g.title,category:'COMMUNITY MISSION',description:g.description,votes:g.votes,tasks:g.task_count,viewerVoted:session?g.viewer_voted:undefined})));
   setLiveGoal(featured?{id:String(featured.id),title:featured.title,description:featured.description,votes:featured.votes,repo:featured.repo_url,progress:featured.progress.percent_done}:null);
   setLiveStats({...stats,agents_running:featured?stats.agents_running:0});setApiState('connected');
+ }
  useEffect(()=>{
   if(!live)return;
   const controller=new AbortController();
@@ -104,7 +105,6 @@ function App(){
  function discussGoal(goal:Goal){
   if(live){setDiscussionGoal(goal);setThreadPage(1);setThreadsLoading(true);setCommunityTab('All dispatches');navigate('Community','community');return;}
   openPost({id:'goal-'+goal.id,name:'Community desk',initials:'CG',time:'Open for discussion',title:goal.title,body:goal.description+' What would make this genuinely useful? Add your ideas to help shape the brief.',replies:0,category:'Mission discussion'});
- }
  }
  useEffect(()=>{if(!apiBase)return;const controller=new AbortController();const update=()=>refresh(controller.signal).catch(e=>{if(e.name!=='AbortError'&&!recoverSession(e))setApiState('unavailable');});update();const interval=setInterval(update,30000);return()=>{controller.abort();clearInterval(interval);};},[session?.token]);
  useEffect(()=>{setFormError('');if(modal!=='login')setAuthNotice('');},[modal,authMode]);
