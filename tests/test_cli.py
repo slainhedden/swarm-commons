@@ -4,6 +4,7 @@ import os
 import subprocess
 from contextlib import nullcontext
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from support import approve, live_server, test_app
@@ -43,7 +44,58 @@ def setup_browser(browser):
     return client, goal, task
 
 
+def test_task_list_escapes_terminal_controls(monkeypatch, capsys):
+    class Tasks:
+        def get(self, path, **params):
+            assert path == "tasks" and params == {"available": True}
+            return [{"id": 1, "votes": 0, "title": "Title\x1b[2J", "goal_title": "Goal\r\nPrompt"}]
+
+    monkeypatch.setattr(cli.Client, "from_config", lambda: nullcontext(Tasks()))
+    assert cli.main(["tasks"]) == 0
+    assert capsys.readouterr().out == "#1  ↑0  Title\\x1b[2J  (Goal\\r\\nPrompt)\n"
+
+
+def test_run_rejects_private_repository_before_claim_or_clone(monkeypatch, capsys):
+    class PrivateTask:
+        def get(self, path):
+            assert path == "tasks/1"
+            return {"repo_url": "https://github.com/example/private"}
+
+    monkeypatch.setattr(cli.Client, "from_config", lambda: nullcontext(PrivateTask()))
+
+    def public_lookup(url, **options):
+        assert url == "https://api.github.com/repos/example/private"
+        assert options["trust_env"] is False and "auth" not in options
+        return httpx.Response(404)
+
+    monkeypatch.setattr(httpx, "get", public_lookup)
+    assert cli.main(["run", "1", "--agent", "fake"]) == 1
+    assert "public GitHub repository" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("private", [False, True])
+def test_public_repo_lookup_follows_github_repo_redirects(monkeypatch, private):
+    requested = []
+
+    def lookup(url, **kwargs):
+        requested.append(str(url))
+        if len(requested) == 1:
+            return httpx.Response(301, headers={"Location": "https://api.github.com/repositories/123"})
+        return httpx.Response(200, json={"private": private, "full_name": "NewOrg/NewProject"})
+
+    monkeypatch.setattr(httpx, "get", lookup)
+    if private:
+        with pytest.raises(cli.SwarmError, match="public GitHub repository"):
+            cli.require_public_repo("old/project")
+    else:
+        assert cli.require_public_repo("old/project") == "NewOrg/NewProject"
+    assert requested == ["https://api.github.com/repos/old/project", "https://api.github.com/repositories/123"]
+
+
 def test_fake_run_against_local_bare_repo(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(httpx, "get", lambda *args, **kwargs: httpx.Response(
+        200, json={"private": False, "full_name": "example/docs"},
+    ))
     remote = tmp_path / "remote.git"
     git("init", "--bare", "--initial-branch=main", str(remote), cwd=tmp_path)
     source = tmp_path / "source"
@@ -136,9 +188,11 @@ def test_mcp_tools_coordinate_with_the_api(tmp_path):
                 {"title": "Follow-up", "description": "Check the result", "criteria": "Verify setup"},
             ]})
             await mcp.call_tool("submit_result", {"id": task["id"], "pr_url": "https://github.com/example/docs/pull/1",
-                                                  "summary": "MCP reports an existing PR"})
+                                                  "summary": "MCP reports an existing PR",
+                                                  "tests": [{"command": "pytest", "outcome": "passed"}]})
 
         asyncio.run(exercise())
         assert client.get(f"goals/{goal['id']}/notes")[0]["body"] == "Finding from MCP"
         assert client.get("tasks", available=True) == []
         assert client.get(f"tasks/{task['id']}")["status"] == "submitted"
+        assert client.get(f"tasks/{task['id']}")["handoff"]["tests"] == [{"command": "pytest", "outcome": "passed"}]
