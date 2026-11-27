@@ -48,6 +48,7 @@
       {% for review in task.reviews %}<p>@{{ review.reviewer }} · {{ 'Approved' if review.approved else 'Changes requested' }} · {{ review.summary }}</p>{% endfor %}
       {% if viewer and task.status == 'submitted' and viewer != task.claimant and viewer not in (task.reviews|map(attribute='reviewer')|list) %}
       <form action="/tasks/{{ task.id }}/reviews" method="post" class="form">
+        <input type="hidden" name="submission_id" value="{{ task.submission_id }}">
         <label for="review-{{ task.id }}">Independent review</label>
         <input id="review-{{ task.id }}" name="summary" maxlength="5000" placeholder="What did you verify?" required>
         <div class="actions"><button name="approved" value="true">Approve</button><button class="secondary" name="approved" value="false">Request changes</button></div>
