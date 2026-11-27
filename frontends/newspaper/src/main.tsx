@@ -103,7 +103,7 @@ function App(){
   return()=>{controller.abort();clearInterval(interval);};
  },[live,session?.token,threadPage,threadRevision,discussionGoal?.id]);
  function discussGoal(goal:Goal){
-  if(live){setDiscussionGoal(goal);setThreadPage(1);setThreadsLoading(true);setCommunityTab('All dispatches');navigate('Community','community');return;}
+  if(live){setDiscussionGoal(goal);setThreadPage(1);setThreadRevision(value=>value+1);setThreadsLoading(true);setCommunityTab('All dispatches');navigate('Community','community');return;}
   openPost({id:'goal-'+goal.id,name:'Community desk',initials:'CG',time:'Open for discussion',title:goal.title,body:goal.description+' What would make this genuinely useful? Add your ideas to help shape the brief.',replies:0,category:'Mission discussion'});
  }
  useEffect(()=>{if(!apiBase)return;const controller=new AbortController();const update=()=>refresh(controller.signal).catch(e=>{if(e.name!=='AbortError'&&!recoverSession(e))setApiState('unavailable');});update();const interval=setInterval(update,30000);return()=>{controller.abort();clearInterval(interval);};},[session?.token]);
