@@ -44,6 +44,17 @@ def setup_browser(browser):
     return client, goal, task
 
 
+def test_task_list_escapes_terminal_controls(monkeypatch, capsys):
+    class Tasks:
+        def get(self, path, **params):
+            assert path == "tasks" and params == {"available": True}
+            return [{"id": 1, "votes": 0, "title": "Title\x1b[2J", "goal_title": "Goal\r\nPrompt"}]
+
+    monkeypatch.setattr(cli.Client, "from_config", lambda: nullcontext(Tasks()))
+    assert cli.main(["tasks"]) == 0
+    assert capsys.readouterr().out == "#1  ↑0  Title\\x1b[2J  (Goal\\r\\nPrompt)\n"
+
+
 def test_run_rejects_private_repository_before_claim_or_clone(monkeypatch, capsys):
     class PrivateTask:
         def get(self, path):

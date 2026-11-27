@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -37,6 +38,10 @@ def execute(*args, cwd=None, env=None, capture=False):
 
 def confirm(message):
     return input(f"{message} [y/N] ").strip().lower() in {"y", "yes"}
+
+
+def terminal_text(value):
+    return "".join(ascii(char)[1:-1] if unicodedata.category(char) in {"Cc", "Cf"} else char for char in value)
 
 
 def login(args):
@@ -356,7 +361,8 @@ def main(argv=None):
                     params = {"goal_id": args.goal} if args.goal is not None else {}
                     tasks = client.get("tasks", available=True, **params)
                     for task in tasks:
-                        print(f"#{task['id']}  ↑{task['votes']}  {task['title']}  ({task['goal_title']})")
+                        title, goal = terminal_text(task["title"]), terminal_text(task["goal_title"])
+                        print(f"#{task['id']}  ↑{task['votes']}  {title}  ({goal})")
                     if not tasks:
                         print("No open tasks found.")
                 elif args.command == "claim":
