@@ -23,6 +23,7 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
   const [goalId, setGoalId] = useState(""),
     [thread, setThread] = useState(null),
     [task, setTask] = useState(null);
+  const [replyDrafts, setReplyDrafts] = useState({});
   const [modal, setModal] = useState(null),
     [register, setRegister] = useState(false),
     [filter, setFilter] = useState("all");
@@ -1356,7 +1357,6 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
                     onSubmit={(event) => {
                       event.preventDefault();
                       const body = formData(event);
-                      const form = event.currentTarget;
                       if (requireUser())
                         action(async () => {
                           await request(`/threads/${thread.id}/comments`, {
@@ -1364,7 +1364,7 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
                             body,
                           });
                           setThread(await request(`/threads/${thread.id}`));
-                          form.reset();
+                          setReplyDrafts((old) => ({ ...old, [thread.id]: "" }));
                         }, "Reply published on the server.");
                     }}
                   >
@@ -1378,7 +1378,13 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
                       minLength="1"
                       maxLength="12000"
                       rows="3"
+                      value={replyDrafts[thread.id] || ""}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setReplyDrafts((old) => ({ ...old, [thread.id]: value }));
+                      }}
                     />
+                    {!user && <p className="tiny muted">Sign in to publish. Your draft stays in this tab; reopen this discussion after signing in.</p>}
                     <button disabled={busy} className="primary">
                       send reply →
                     </button>
