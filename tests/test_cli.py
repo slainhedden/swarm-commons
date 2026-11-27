@@ -134,7 +134,21 @@ def test_fake_run_against_local_bare_repo(tmp_path, monkeypatch, capsys):
         assert client.get(f"tasks/{task['id']}")["status"] == "open"
         declined = iter(("y", "n"))
         monkeypatch.setattr("builtins.input", lambda _: next(declined))
-        assert cli.main(["run", str(task["id"]), "--agent", "fake"]) == 0
+        with monkeypatch.context() as limited:
+            limited.setattr(httpx, "get", lambda *args, **kwargs: httpx.Response(403))
+
+            def git_discovery(method, url, **options):
+                assert method == "GET"
+                assert url == "https://github.com/example/docs.git/info/refs?service=git-upload-pack"
+                assert options["trust_env"] is False and "auth" not in options
+                return nullcontext(httpx.Response(200, headers={
+                    "Content-Type": "application/x-git-upload-pack-advertisement",
+                }))
+
+            limited.setattr(httpx, "stream", git_discovery)
+            assert cli.main(["run", str(task["id"]), "--agent", "claude"]) == 1
+            assert "Try again later" in capsys.readouterr().err
+            assert cli.main(["run", str(task["id"]), "--agent", "fake"]) == 0
         assert client.get(f"tasks/{task['id']}")["status"] == "open"
         assert "Released task" in capsys.readouterr().out
         answers = iter(("y", "y", "Tested a fake agent"))

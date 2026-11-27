@@ -15,7 +15,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from .client import Client, SwarmError, save_config, server_url
-from .github import GITHUB_REPO, public_repo_slug, valid_repo_slug
+from .github import GITHUB_REPO, GitHubMetadataUnavailable, public_repo_slug, publicly_cloneable, valid_repo_slug
 from .guards import claude_guard, commit_guard, install_commit_guard, staged_paths, verify_paths
 from .local import load_policy, safe_env, state_root, usage_reservation
 from .orchestration import Handoff
@@ -209,8 +209,13 @@ def report_run(client, task_id, agent):
         report("finished", "Local agent finished; changes await contributor review.")
 
 
-def require_public_repo(slug):
-    canonical = public_repo_slug(slug)
+def require_public_repo(slug, *, fake=False):
+    try:
+        canonical = public_repo_slug(slug)
+    except GitHubMetadataUnavailable:
+        if fake and publicly_cloneable(slug):
+            return slug
+        raise SwarmError("GitHub denied or rate-limited the public repository lookup. Try again later.") from None
     if canonical is None:
         raise SwarmError("Could not verify the target as a public GitHub repository.")
     return canonical
@@ -222,7 +227,7 @@ def run_task(client, args):
     slug = repo.removeprefix(GITHUB_REPO)
     if slug == repo or not valid_repo_slug(slug):
         raise SwarmError("Task does not target a supported GitHub repository.")
-    slug = require_public_repo(slug)
+    slug = require_public_repo(slug, fake=args.agent == "fake")
     repo = GITHUB_REPO + slug
     if bool(args.test_image) != bool(args.test_command):
         raise SwarmError("Set both --test-image and --test-command to verify in Docker.")

@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 from sqlalchemy.exc import IntegrityError
 
 from .accounts import password_hash, token_hash, verify_password
-from .github import GITHUB_REPO, REPO_SLUG, public_repo_slug, valid_repo_slug
+from .github import GITHUB_REPO, REPO_SLUG, GitHubMetadataUnavailable, public_repo_slug, valid_repo_slug
 from .moderation import (
     KINDS, RESERVED, Kind, LimitWriteBody, ModerationInput, ReportInput, RoleInput, admin_handles, check_github_pr,
 )
@@ -596,8 +596,13 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         if not submitted_repo:
             raise HTTPException(422, "Use a GitHub pull request URL on the goal repository.")
         pr_slug = submitted_repo[1].lower()
-        if pr_slug != goal_slug.lower() and pr_slug != (public_repo_slug(goal_slug) or "").lower():
-            raise HTTPException(422, "Use a GitHub pull request URL on the goal repository.")
+        if pr_slug != goal_slug.lower():
+            try:
+                canonical = public_repo_slug(goal_slug)
+            except GitHubMetadataUnavailable:
+                canonical = None
+            if pr_slug != (canonical or "").lower():
+                raise HTTPException(422, "Use a GitHub pull request URL on the goal repository.")
         check = pr_checker(data.pr_url, item["claimed_at"])
         if check == "invalid":
             raise HTTPException(422, "Use an open PR created after this claim.")
