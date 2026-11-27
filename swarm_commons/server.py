@@ -168,10 +168,6 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
 
     app = FastAPI(title="Swarm Commons", lifespan=lifespan)
     app.add_middleware(LimitWriteBody)
-    origins = [item.strip() for item in os.environ.get("SWARM_CORS_ORIGINS", "*").split(",") if item.strip()]
-    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "DELETE"],
-                       allow_headers=["Authorization", "Content-Type", "Last-Event-ID"],
-                       allow_credentials=bool(origins and "*" not in origins))
     bearer_scheme = HTTPBearer(auto_error=False, scheme_name="SwarmBearer")
     api = APIRouter(prefix="/api/v1")
     templates = Jinja2Templates(directory=ROOT / "templates")
@@ -288,6 +284,11 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             if not await run_in_threadpool(count_write, ip, handle, signup_attempt):
                 return JSONResponse({"detail": "Too many writes. Try again in a minute."}, status_code=429, headers={"Retry-After": "60"})
         return await call_next(request)
+
+    origins = [item.strip() for item in os.environ.get("SWARM_CORS_ORIGINS", "*").split(",") if item.strip()]
+    app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "DELETE"],
+                       allow_headers=["Authorization", "Content-Type", "Last-Event-ID"],
+                       allow_credentials=bool(origins and "*" not in origins))
 
     def progress(db, goal_id):
         counts = dict.fromkeys(("open", "claimed", "submitted", "done"), 0)

@@ -71,6 +71,25 @@ def test_limits_vote_age_locking_and_pagination(tmp_path):
         assert browser.post(f"{PREFIX}/goals", json=GOAL, headers=voter).status_code == 429
 
 
+def test_cors_headers_on_rejected_writes(tmp_path, monkeypatch):
+    origin = "http://localhost:5185"
+    monkeypatch.setenv("SWARM_CORS_ORIGINS", origin)
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False, clock=lambda: 1000, signup_limit=1)) as browser:
+        account = {"username": "reader", "password": "a unique passphrase"}
+        assert browser.post(f"{PREFIX}/auth/register", json=account).status_code == 201
+        headers = {"Origin": origin}
+        rate_limited = browser.post(f"{PREFIX}/auth/login", headers=headers, json=account)
+        too_large = browser.post(f"{PREFIX}/threads", headers=headers, content=b"a" * 65537)
+        csrf_rejected = browser.post(f"{PREFIX}/goals", headers=headers, json=GOAL)
+        for response, status in ((rate_limited, 429), (too_large, 413), (csrf_rejected, 403)):
+            assert response.status_code == status
+            assert response.headers["Access-Control-Allow-Origin"] == origin
+        assert rate_limited.headers["Retry-After"] == "60"
+        denied = browser.post(f"{PREFIX}/auth/login", headers={"Origin": "https://unrelated.example"}, json=account)
+        assert denied.status_code == 429
+        assert "Access-Control-Allow-Origin" not in denied.headers
+
+
 def test_goal_sharing_csrf_inline_forms_and_watch_scope(tmp_path):
     with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
         proposer = contributor(browser, "writer")
