@@ -46,6 +46,17 @@ export async function request(
 export async function updateGoalVote(id, removing) {
   return request(`/goals/${id}/vote`, undefined, removing ? "DELETE" : "POST");
 }
+export async function requestThreadPages(count = 1) {
+  const pages = await Promise.all(
+    Array.from({ length: count }, (_, index) =>
+      request(`/threads?page=${index + 1}&limit=20`),
+    ),
+  );
+  return {
+    items: [...new Map(pages.flat().map((thread) => [thread.id, thread])).values()],
+    hasMore: pages.at(-1).length === 20,
+  };
+}
 export function goalVoteIds(goals, handle, accountVotes) {
   if (!handle) return [];
   const fallback = accountVotes[`${API_BASE}:${handle}`] || [];

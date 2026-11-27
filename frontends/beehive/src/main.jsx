@@ -36,6 +36,7 @@ import {
   threadFromApi,
   updateGoalVote,
   goalVoteIds,
+  requestThreadPages,
 } from "./api";
 
 const REPO = "https://github.com/slainhedden/swarm-commons";
@@ -269,6 +270,9 @@ function App() {
   const [demoThreads, setDemoThreads] = useStored("threads", seedThreads);
   const [remoteGoals, setRemoteGoals] = useState(null);
   const [remoteThreads, setRemoteThreads] = useState([]);
+  const [threadPages, setThreadPages] = useState(1);
+  const [hasMoreThreads, setHasMoreThreads] = useState(false);
+  const [loadingThreads, setLoadingThreads] = useState(false);
   const [remoteActivity, setRemoteActivity] = useState([]);
   const [remoteTasks, setRemoteTasks] = useState([]);
   const [remoteProfile, setRemoteProfile] = useState(null);
@@ -326,7 +330,7 @@ function App() {
             request("/stats"),
             request("/goals"),
             request("/goals/featured"),
-            request("/threads"),
+            requestThreadPages(threadPages),
             request("/activity?limit=12"),
             request("/tasks"),
           ]);
@@ -338,11 +342,12 @@ function App() {
         setRemoteGoals(ordered.map((g, i) => goalFromApi(g, i, tasks)));
         // Preserve any already-loaded comments during background refresh.
         setRemoteThreads((previous) =>
-          allThreads.map((t) => ({
+          allThreads.items.map((t) => ({
             ...threadFromApi(t),
             replies: previous.find((p) => p.id === t.id)?.replies || [],
           })),
         );
+        setHasMoreThreads(allThreads.hasMore);
         setRemoteActivity(events);
         setRemoteTasks(tasks);
         setApiStatus("connected");
@@ -360,6 +365,8 @@ function App() {
             current === "connected" ? current : "offline",
           );
         }
+      } finally {
+        if (!disposed) setLoadingThreads(false);
       }
     }
     async function restoreAndRefresh() {
@@ -383,7 +390,7 @@ function App() {
       disposed = true;
       clearInterval(interval);
     };
-  }, [remoteProfile?.name]);
+  }, [remoteProfile?.name, threadPages]);
   useEffect(() => {
     const id = setInterval(() => setActivity((a) => (a + 1) % 4), 6500);
     return () => clearInterval(id);
@@ -1298,6 +1305,19 @@ function App() {
                       <ChevronRight size={20} />
                     </button>
                   ))}
+                  {connected && hasMoreThreads && (
+                    <button
+                      className="button dark full"
+                      disabled={loadingThreads}
+                      onClick={() => {
+                        setLoadingThreads(true);
+                        setThreadPages((count) => count + 1);
+                      }}
+                    >
+                      {loadingThreads ? "Loading conversations…" : "Older conversations"}
+                      <ArrowRight size={17} />
+                    </button>
+                  )}
                 </div>
                 <aside className="community-note">
                   <Flower2 size={30} />

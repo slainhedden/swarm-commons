@@ -6,6 +6,7 @@ import {
   goalFromApi,
   updateGoalVote,
   saveToken,
+  requestThreadPages,
 } from "./api.js";
 
 test("server vote state overrides stale local flags, with account-specific older-API fallback", () => {
@@ -19,6 +20,21 @@ test("server vote state overrides stale local flags, with account-specific older
   assert.deepEqual(goalVoteIds(goals, "river", stored), [2, 3]);
   assert.deepEqual(goalVoteIds(goals, "cedar", stored), [2, 4]);
   assert.deepEqual(goalVoteIds(goals, undefined, stored), []);
+});
+
+test("older discussion pages stay reachable and overlapping page boundaries do not duplicate threads", async (t) => {
+  const first = Array.from({ length: 20 }, (_, index) => ({ id: index + 1 }));
+  const second = [{ id: 20 }, { id: 21 }];
+  t.mock.method(globalThis, "fetch", async (url) => {
+    const page = new URL(url, "http://localhost").searchParams.get("page");
+    assert.equal(new URL(url, "http://localhost").searchParams.get("limit"), "20");
+    return Response.json(page === "1" ? first : second);
+  });
+  assert.equal((await requestThreadPages()).hasMore, true);
+  const loaded = await requestThreadPages(2);
+  assert.equal(loaded.items.length, 21);
+  assert.equal(loaded.items.at(-1).id, 21);
+  assert.equal(loaded.hasMore, false);
 });
 
 test("vote and undo use the v2 methods, bearer auth and canonical response", async (t) => {
