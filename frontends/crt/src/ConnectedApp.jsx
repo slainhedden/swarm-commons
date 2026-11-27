@@ -6,6 +6,12 @@ import {
   request,
   safeUrl,
 } from "./client.js";
+import {
+  adoptGuestDrafts,
+  editReplyDraft,
+  emptyDrafts,
+  readReplyDraft,
+} from "./drafts.js";
 
 const REPO = "https://github.com/slainhedden/swarm-commons";
 const list = (value) => {
@@ -28,7 +34,7 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
   const [goalId, setGoalId] = useState(""),
     [thread, setThread] = useState(null),
     [task, setTask] = useState(null);
-  const [replyDrafts, setReplyDrafts] = useState({});
+  const [replyDrafts, setReplyDrafts] = useState(emptyDrafts);
   const [modal, setModal] = useState(null),
     [register, setRegister] = useState(false),
     [filter, setFilter] = useState("all");
@@ -243,6 +249,7 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
     }
   };
   const changeIdentity = () => {
+    setReplyDrafts(emptyDrafts());
     setGoals([]);
     setThreads([]);
     setTasks([]);
@@ -1000,6 +1007,9 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
                           { method: "POST", body },
                         );
                         changeIdentity();
+                        setReplyDrafts(
+                          adoptGuestDrafts(replyDrafts, identity.handle),
+                        );
                         setUser({ handle: identity.handle });
                       },
                       register
@@ -1381,10 +1391,9 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
                             body,
                           });
                           setThread(await request(`/threads/${thread.id}`));
-                          setReplyDrafts((old) => ({
-                            ...old,
-                            [thread.id]: "",
-                          }));
+                          setReplyDrafts((old) =>
+                            editReplyDraft(old, user.handle, thread.id, ""),
+                          );
                         }, "Reply published on the server.");
                     }}
                   >
@@ -1398,13 +1407,16 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
                       minLength="1"
                       maxLength="12000"
                       rows="3"
-                      value={replyDrafts[thread.id] || ""}
+                      value={readReplyDraft(
+                        replyDrafts,
+                        user?.handle,
+                        thread.id,
+                      )}
                       onChange={(event) => {
                         const value = event.target.value;
-                        setReplyDrafts((old) => ({
-                          ...old,
-                          [thread.id]: value,
-                        }));
+                        setReplyDrafts((old) =>
+                          editReplyDraft(old, user?.handle, thread.id, value),
+                        );
                       }}
                     />
                     {!user && (
