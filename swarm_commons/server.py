@@ -849,15 +849,19 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             raise HTTPException(404, "Unknown content type.")
         return require_row(db.execute(f"SELECT * FROM {kind} WHERE id = ?", (item_id,)).fetchone(), "Content")
 
-    def public_parents(db, kind, item):
+    def public_parents(db, kind, item, *, pending_goal_owner=None):
         if kind == "comments":
             parent = opaque_item(db, "threads", item["thread_id"])
             if parent["visibility"] != "approved":
                 return False
             item = parent
         goal_id = item.get("goal_id")
-        if goal_id is not None and opaque_item(db, "goals", goal_id)["visibility"] != "approved":
-            return False
+        if goal_id is not None:
+            parent = opaque_item(db, "goals", goal_id)
+            if parent["visibility"] != "approved" and not (
+                parent["visibility"] == "pending" and parent["author"] == pending_goal_owner
+            ):
+                return False
         if kind == "tasks" and item["parent_id"] is not None:
             hidden_parent = db.execute("""
                 WITH RECURSIVE ancestors(id, parent_id, visibility) AS (
@@ -912,7 +916,8 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             goal_id = item_id if kind == "goals" else item.get("goal_id")
             if not staff:
                 owns_task_goal = kind == "tasks" and opaque_item(db, "goals", goal_id)["author"] == handle
-                if not public_parents(db, kind, item) or (
+                pending_goal_owner = handle if owns_task_goal and data.action == "approve" else None
+                if not public_parents(db, kind, item, pending_goal_owner=pending_goal_owner) or (
                     item["visibility"] != "approved" and not (
                         item["visibility"] == "pending" and (item["author"] == handle or owns_task_goal)
                     )

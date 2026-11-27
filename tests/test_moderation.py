@@ -81,6 +81,19 @@ def test_reports_do_not_reveal_children_of_hidden_parents(tmp_path):
                                     json=report).status_code == 404
 
 
+def test_goal_owner_can_approve_pending_task_before_goal_is_public(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        stranger = contributor(browser, "stranger")
+        goal = browser.post(f"{PREFIX}/goals", headers=owner, json=GOAL).json()["id"]
+        task = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=owner, json=TASK).json()["id"]
+        route = f"{PREFIX}/moderation/tasks/{task}"
+        decision = {"action": "approve", "reason": "Reviewed"}
+        assert browser.post(route, headers=stranger, json=decision).status_code == 404
+        assert browser.post(route, headers=owner, json=decision).status_code == 200
+        assert browser.get(f"{PREFIX}/tasks/{task}").status_code == 404
+
+
 def test_ban_removes_activity_from_a_different_authors_task(tmp_path):
     with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
         owner = contributor(browser, "owner")
