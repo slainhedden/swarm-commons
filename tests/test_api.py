@@ -64,6 +64,43 @@ def test_accounts_and_cors(app):
     }).headers["access-control-allow-origin"] == "*"
 
 
+def test_optional_auth_rejects_invalid_bearer_but_accepts_anonymous_reads(tmp_path, monkeypatch):
+    origin = "http://localhost:5185"
+    monkeypatch.setenv("SWARM_CORS_ORIGINS", origin)
+    now = [1000]
+    with TestClient(test_app(tmp_path / "test.sqlite3", seed=True, clock=lambda: now[0])) as browser:
+        path = f"{PREFIX}/goals"
+        origin_header = {"Origin": origin}
+        anonymous = browser.get(path, headers=origin_header).raise_for_status()
+        assert anonymous.json()[0]["viewer_voted"] is False
+
+        def check_rejected(authorization):
+            headers = {**origin_header, "Authorization": authorization}
+            response = browser.get(path, headers=headers)
+            required = browser.get(f"{PREFIX}/me", headers=headers)
+            assert response.status_code == required.status_code == 401
+            assert response.json() == required.json()
+            assert response.headers["WWW-Authenticate"] == required.headers["WWW-Authenticate"] == "Bearer"
+            assert response.headers["Access-Control-Allow-Origin"] == origin
+
+        account = {"username": "casey", "password": "a unique passphrase"}
+        registered = browser.post(f"{PREFIX}/auth/register", json=account).raise_for_status()
+        first_token = registered.json()["token"]
+        check_rejected("Bearer")
+        check_rejected("bearer invalid")
+        assert browser.post(f"{PREFIX}/auth/logout").status_code == 200
+        check_rejected(f"Bearer {first_token}")
+
+        logged_in = browser.post(f"{PREFIX}/auth/login", json=account).raise_for_status()
+        second_token = logged_in.json()["token"]
+        now[0] += 31 * 24 * 3600
+        check_rejected(f"Bearer {second_token}")
+        assert browser.cookies.get("swarm_session") is not None
+        stale_cookie = browser.get(path, headers=origin_header).raise_for_status()
+        assert stale_cookie.json()[0]["viewer_voted"] is False
+        assert browser.get(f"{PREFIX}/me").status_code == 401
+
+
 def test_voting_progress_and_submission(app):
     browser, _ = app
     author = contributor(browser, "river")

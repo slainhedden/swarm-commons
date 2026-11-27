@@ -200,10 +200,16 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         with connect(engine, write=True) as db:
             return session(db, data.username)
 
+    def bearer_token(request):
+        parts = request.headers.get("Authorization", "").split(maxsplit=1)
+        if parts and parts[0].lower() == "bearer":
+            return parts[1].strip() if len(parts) == 2 else ""
+        return None
+
     def request_token(request, *, web=False):
-        header = request.headers.get("Authorization", "")
-        if not web and header.startswith("Bearer "):
-            return header.removeprefix("Bearer ")
+        bearer = None if web else bearer_token(request)
+        if bearer is not None:
+            return bearer
         return request.cookies.get("swarm_session", "")
 
     def active_session(token):
@@ -231,14 +237,15 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 db.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash(token),))
         response.delete_cookie("swarm_session")
 
-    def contributor(request, *, web=False):
+    def contributor(request, *, web=False, optional=False):
         handle = viewer(request, web=web)
-        if handle is None:
-            raise HTTPException(401, "Sign in to Swarm Commons again; your session may have expired.")
+        if handle is None and (not optional or (not web and bearer_token(request) is not None)):
+            raise HTTPException(401, "Sign in to Swarm Commons again; your session may have expired.",
+                                headers=None if web else {"WWW-Authenticate": "Bearer"})
         return handle
 
     def authenticate_request(request: Request, _=Depends(bearer_scheme)):
-        if request.method != "GET" and not request.headers.get("Authorization", "").startswith("Bearer "):
+        if request.method != "GET" and bearer_token(request) is None:
             web_origin(request)
         return contributor(request)
 
@@ -246,7 +253,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
 
     def optional_viewer(request: Request, response: Response):
         response.headers["Cache-Control"] = "private, no-store"
-        return viewer(request)
+        return contributor(request, optional=True)
 
     read_viewer = Depends(optional_viewer)
 
