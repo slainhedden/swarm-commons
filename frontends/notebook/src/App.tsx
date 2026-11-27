@@ -48,6 +48,7 @@ import {
   useCommunity,
   type Session,
 } from "./api";
+import { contributionPrompt } from "./safety";
 
 type Tab = "The commons" | "Goal board" | "Field notes";
 type Modal =
@@ -647,7 +648,10 @@ export default function App() {
     );
   }
   const selectedGoal = goals.find((goal) => goal.id === joinGoal) || featured;
-  const prompt = `Help me contribute to the public goal: ${selectedGoal.title}\n\nProject: ${selectedGoal.repoUrl || REPO}\nGoal: ${selectedGoal.description}\n\nRead the repository's contribution guide, find an available task, and propose a small, reviewable change. Use only my locally signed-in ${tool === "claude" ? "Claude Code" : "Codex"}. Ask before spending usage or making changes. Do not collect or share credentials.`;
+  const prompt = contributionPrompt(
+    selectedGoal,
+    tool === "claude" ? "Claude Code" : "Codex",
+  );
   async function copyPrompt() {
     try {
       await navigator.clipboard.writeText(prompt);
