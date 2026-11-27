@@ -25,6 +25,8 @@ An expired bearer session (401) clears the browser's saved token and reopens sig
 
 Connected community dispatches have previous/next pages, including older discussions beyond the first 20. Discussing a mission filters the community desk by that goal; new dispatches made there include its `goal_id`. Clear the mission filter to return to general and other mission discussions. Demo mission replies remain browser-local.
 
+Connected discussion replies have previous/next pages of up to 100 replies. Publishing a reply opens the current final reply page, including when a new page is created; reopening a thread starts on its first page. Demo replies remain browser-local and are not paginated.
+
 The frontend falls back to clearly labeled, browser-local demo data if the API fails (including a cross-origin sign-in proxy failure). The deployed editorial showcase intentionally defaults to demo mode. Demo profiles cannot authenticate public API actions, and demo contributions never silently sync to the server. Shared API integration follows `docs/API.md`; it is compile-checked but is not end-to-end verified against the separately authenticated backend App.
 
 ### Local connected-mode check
