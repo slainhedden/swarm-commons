@@ -40,10 +40,26 @@ class PathCheckInput(BaseModel):
     paths: list[PathString] = Field(min_length=1, max_length=500)
 
 
-READY_FILTER = """
+def approved_task_ancestors(parent):
+    return f"""
+        NOT EXISTS (
+            WITH RECURSIVE ancestors(id, parent_id, visibility) AS (
+                SELECT id, parent_id, visibility FROM tasks WHERE id = {parent}
+                UNION ALL
+                SELECT predecessor.id, predecessor.parent_id, predecessor.visibility
+                FROM tasks predecessor JOIN ancestors a ON predecessor.id = a.parent_id
+            ) SELECT 1 FROM ancestors WHERE visibility <> 'approved'
+        )
+    """
+
+
+READY_FILTER = f"""
     NOT EXISTS (
         SELECT 1 FROM task_dependencies d JOIN tasks upstream ON upstream.id = d.dependency_id
-        WHERE d.task_id = t.id AND (upstream.status <> 'done' OR upstream.visibility <> 'approved')
+        WHERE d.task_id = t.id AND (
+            upstream.status <> 'done' OR upstream.visibility <> 'approved'
+            OR NOT ({approved_task_ancestors("upstream.parent_id")})
+        )
     )
 """
 

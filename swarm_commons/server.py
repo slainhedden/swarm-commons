@@ -27,7 +27,7 @@ from .moderation import (
 )
 from .orchestration import (
     READY_FILTER, Handoff, PathCheckInput, PathLeaseInput, ReviewInput,
-    check_paths, lease_path, register_dependencies,
+    approved_task_ancestors, check_paths, lease_path, register_dependencies,
 )
 from .store import connect, database, initialize, migrate
 
@@ -36,6 +36,7 @@ ROOT = Path(__file__).parent
 REPLIES_PER_PAGE = 100
 MAX_EVENT_STREAMS = 32
 MAX_EVENT_STREAMS_PER_IP = 4
+TASK_ANCESTORS_APPROVED = approved_task_ancestors("t.parent_id")
 HANDLE = r"^[a-z0-9][a-z0-9_-]{1,38}$"
 REPO = re.compile(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+")
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=140)]
@@ -341,8 +342,9 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
 
     def progress(db, goal_id):
         counts = dict.fromkeys(("open", "claimed", "submitted", "done"), 0)
-        for row in db.execute("""
-            SELECT status, COUNT(*) AS count FROM tasks WHERE goal_id = ? AND visibility = 'approved' GROUP BY status
+        for row in db.execute(f"""
+            SELECT status, COUNT(*) AS count FROM tasks t
+            WHERE goal_id = ? AND visibility = 'approved' AND {TASK_ANCESTORS_APPROVED} GROUP BY status
         """, (goal_id,)):
             counts[row["status"]] = row["count"]
         total = sum(counts.values())
@@ -356,9 +358,10 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def goals():
         with connect(engine, write=True) as db:
             expire(db)
-            items = [dict(row) for row in db.execute("""
+            items = [dict(row) for row in db.execute(f"""
                 SELECT g.*, (SELECT COUNT(*) FROM goal_votes WHERE goal_id = g.id) AS votes,
-                    (SELECT COUNT(*) FROM tasks WHERE goal_id = g.id AND visibility = 'approved') AS task_count
+                    (SELECT COUNT(*) FROM tasks t WHERE goal_id = g.id AND visibility = 'approved'
+                        AND {TASK_ANCESTORS_APPROVED}) AS task_count
                 FROM goals g WHERE g.visibility = 'approved' ORDER BY votes DESC, g.id
             """)]
             return [with_progress(db, item) for item in items]
@@ -366,9 +369,10 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def goal(goal_id, handle=None, *, any_visibility=False):
         with connect(engine, write=True) as db:
             expire(db)
-            item = require_row(db.execute("""
+            item = require_row(db.execute(f"""
                 SELECT g.*, (SELECT COUNT(*) FROM goal_votes WHERE goal_id = g.id) AS votes,
-                    (SELECT COUNT(*) FROM tasks WHERE goal_id = g.id AND visibility = 'approved') AS task_count
+                    (SELECT COUNT(*) FROM tasks t WHERE goal_id = g.id AND visibility = 'approved'
+                        AND {TASK_ANCESTORS_APPROVED}) AS task_count
                 FROM goals g WHERE id = ?
             """, (goal_id,)).fetchone(), "Goal")
             if item["visibility"] != "approved" and not any_visibility and not (handle and (
@@ -435,6 +439,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 params += (goal_id,)
             if available:
                 conditions.extend(("t.status = 'open'", "g.visibility = 'approved'", "t.visibility = 'approved'", READY_FILTER))
+            conditions.append(TASK_ANCESTORS_APPROVED)
             query = task_query + " WHERE " + " AND ".join(conditions) + " ORDER BY votes DESC, t.id"
             rows = [dict(row) for row in db.execute(query, params)]
             return [task_details(db, row, review=True) for row in rows]
@@ -442,7 +447,8 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def task(task_id, handle=None, *, any_visibility=False):
         with connect(engine, write=True) as db:
             expire(db)
-            item = require_row(db.execute(task_query + " WHERE t.id = ?", (task_id,)).fetchone(), "Task")
+            conditions = " WHERE t.id = ?" if any_visibility else f" WHERE t.id = ? AND {TASK_ANCESTORS_APPROVED}"
+            item = require_row(db.execute(task_query + conditions, (task_id,)).fetchone(), "Task")
             if (item["visibility"] != "approved" or item["goal_visibility"] != "approved") and not any_visibility:
                 if not handle or not (
                     handle in {item["author"], item["goal_author"]} or role_in(db, handle) in {"admin", "moderator"}
@@ -536,7 +542,8 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             suffix = " FOR UPDATE" if db.connection.dialect.name == "postgresql" else ""
             db.execute("SELECT handle FROM contributors WHERE handle = ?" + suffix, (handle,)).fetchone()
             expire(db)
-            item = require_row(db.execute(task_query + " WHERE t.id = ?", (task_id,)).fetchone(), "Task")
+            item = require_row(db.execute(task_query + f" WHERE t.id = ? AND {TASK_ANCESTORS_APPROVED}",
+                                          (task_id,)).fetchone(), "Task")
             if item["visibility"] != "approved" or item["goal_visibility"] != "approved":
                 if item["visibility"] == "pending" and item["goal_visibility"] == "approved" and (
                     handle in {item["author"], item["goal_author"]} or role_in(db, handle) in {"admin", "moderator"}
@@ -556,6 +563,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             updated = db.execute(f"""
                 UPDATE tasks AS t SET status = 'claimed', claimant = ?, lease_until = ?, claimed_at = ?
                 WHERE id = ? AND status = 'open' AND visibility = 'approved' AND {READY_FILTER}
+                    AND {TASK_ANCESTORS_APPROVED}
                     AND EXISTS (SELECT 1 FROM goals g WHERE g.id = t.goal_id AND g.visibility = 'approved')
             """, (handle, now + lease_seconds, now, task_id))
             if not updated.rowcount:
@@ -657,7 +665,8 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
 
     def active_claim(db, task_id, handle, now):
         suffix = " FOR UPDATE OF t" if db.connection.dialect.name == "postgresql" else ""
-        item = require_row(db.execute(task_query + " WHERE t.id = ?" + suffix, (task_id,)).fetchone(), "Task")
+        item = require_row(db.execute(task_query + f" WHERE t.id = ? AND {TASK_ANCESTORS_APPROVED}" + suffix,
+                                      (task_id,)).fetchone(), "Task")
         if (item["visibility"] != "approved" or item["goal_visibility"] != "approved" or
                 item["status"] != "claimed" or item["claimant"] != handle or item["lease_until"] <= now):
             raise HTTPException(409, "An active task claim is required.")
@@ -733,7 +742,8 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         conditions, params = [
             "NOT EXISTS (SELECT 1 FROM contributors c WHERE c.handle = events.actor AND c.banned = 1)",
             "(goal_id IS NULL OR EXISTS (SELECT 1 FROM goals g WHERE g.id = events.goal_id AND g.visibility = 'approved'))",
-            "(task_id IS NULL OR EXISTS (SELECT 1 FROM tasks t WHERE t.id = events.task_id AND t.visibility = 'approved'))",
+            "(task_id IS NULL OR EXISTS (SELECT 1 FROM tasks t WHERE t.id = events.task_id "
+            f"AND t.visibility = 'approved' AND {TASK_ANCESTORS_APPROVED}))",
         ], ()
         if goal_id is not None:
             conditions.append("goal_id = ?")
@@ -863,14 +873,8 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             ):
                 return False
         if kind == "tasks" and item["parent_id"] is not None:
-            hidden_parent = db.execute("""
-                WITH RECURSIVE ancestors(id, parent_id, visibility) AS (
-                    SELECT id, parent_id, visibility FROM tasks WHERE id = ?
-                    UNION ALL
-                    SELECT t.id, t.parent_id, t.visibility FROM tasks t JOIN ancestors a ON t.id = a.parent_id
-                ) SELECT 1 FROM ancestors WHERE visibility <> 'approved' LIMIT 1
-            """, (item["parent_id"],)).fetchone()
-            return hidden_parent is None
+            return bool(db.execute(f"SELECT {approved_task_ancestors('?')} AS approved",
+                                   (item["parent_id"],)).fetchone()["approved"])
         return True
 
     def report_content(kind, item_id, data, handle):

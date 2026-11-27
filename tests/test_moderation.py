@@ -68,6 +68,7 @@ def test_reports_do_not_reveal_children_of_hidden_parents(tmp_path):
         note = browser.post(f"{PREFIX}/goals/{goal}/notes", headers=owner, json={"body": "Note"}).json()["id"]
         child = browser.post(f"{PREFIX}/tasks/{task}/subtasks", headers=owner, json={"tasks": [TASK]}).json()[0]["id"]
         approve(browser, "tasks", child)
+        assert f'id="task-{child}"' in browser.get(f"/goals/{goal}").text
         hide = {"action": "hide", "reason": "Removed"}
         report = {"reason": "Report"}
         for kind, parent, children in (
@@ -79,6 +80,10 @@ def test_reports_do_not_reveal_children_of_hidden_parents(tmp_path):
             for child_kind, child_id in children:
                 assert browser.post(f"{PREFIX}/{child_kind}/{child_id}/report", headers=outsider,
                                     json=report).status_code == 404
+            if kind == "tasks":
+                assert f'id="task-{child}"' not in browser.get(f"/goals/{goal}").text
+                assert browser.get(f"{PREFIX}/tasks/{child}").status_code == 404
+                assert browser.post(f"{PREFIX}/tasks/{child}/claim", headers=outsider).status_code == 404
 
 
 def test_goal_owner_can_approve_pending_task_before_goal_is_public(tmp_path):
