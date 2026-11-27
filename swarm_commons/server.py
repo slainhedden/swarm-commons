@@ -217,15 +217,30 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             return bearer
         return request.cookies.get("swarm_session", "")
 
+    def valid_session_token(token):
+        return token.startswith("swarm_") and len(token) == 49
+
+    def session_owner(db, token):
+        row = db.execute("""
+            SELECT s.handle FROM sessions s JOIN contributors c ON c.handle = s.handle
+            WHERE s.token_hash = ? AND c.banned = 0 AND (s.expires_at IS NULL OR s.expires_at > ?)
+        """, (token_hash(token), int(clock()))).fetchone()
+        return row["handle"] if row else None
+
     def active_session(token):
-        if not token.startswith("swarm_") or len(token) != 49:
+        if not valid_session_token(token):
             return None
         with connect(engine) as db:
-            row = db.execute("""
-                SELECT s.handle FROM sessions s JOIN contributors c ON c.handle = s.handle
-                WHERE s.token_hash = ? AND c.banned = 0 AND (s.expires_at IS NULL OR s.expires_at > ?)
-            """, (token_hash(token), int(clock()))).fetchone()
-        return row["handle"] if row else None
+            return session_owner(db, token)
+
+    def browser_session_from_token(token):
+        if not valid_session_token(token):
+            raise HTTPException(401, "Swarm contributor token not recognized.")
+        with connect(engine, write=True) as db:
+            handle = session_owner(db, token)
+            if not handle:
+                raise HTTPException(401, "Swarm contributor token not recognized.")
+            return session(db, handle)
 
     def viewer(request, *, web=False):
         return active_session(request_token(request, web=web))
@@ -1266,10 +1281,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         try:
             if action == "token":
                 token = str(form.get("token", "")).strip()
-                handle = active_session(token)
-                if not handle:
-                    raise HTTPException(401, "Swarm contributor token not recognized.")
-                identity = {"handle": handle, "token": token}
+                identity = await run_in_threadpool(browser_session_from_token, token)
             else:
                 account = AccountInput.model_validate(dict(form))
                 identity = await run_in_threadpool(authenticate, account) if action == "login" else (

@@ -66,6 +66,18 @@ def test_accounts_and_cors(app):
     }).headers["access-control-allow-origin"] == "*"
 
 
+def test_web_token_sign_in_and_sign_out_preserves_cli_session(app):
+    browser, _ = app
+    cli_headers = contributor(browser, "token-owner")
+    token = cli_headers["Authorization"].split()[1]
+    assert browser.post("/join", data={"action": "token", "token": token}, follow_redirects=False).status_code == 303
+    web_token = browser.cookies.get("swarm_session")
+    assert browser.get(f"{PREFIX}/me").json()["handle"] == "token-owner"
+    assert browser.post("/sign-out", follow_redirects=False).status_code == 303
+    assert browser.get(f"{PREFIX}/me", headers=cli_headers).status_code == 200
+    assert browser.get(f"{PREFIX}/me", headers={"Authorization": f"Bearer {web_token}"}).status_code == 401
+
+
 def test_optional_auth_rejects_invalid_bearer_but_accepts_anonymous_reads(tmp_path, monkeypatch):
     origin = "http://localhost:5185"
     monkeypatch.setenv("SWARM_CORS_ORIGINS", origin)
