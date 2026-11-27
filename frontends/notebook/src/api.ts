@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Agent, Goal, Note } from "./data";
+import { apiRequestUrl } from "./safety";
 
 const configuredBase = (import.meta.env.VITE_API_BASE || "")
   .trim()
@@ -126,7 +127,8 @@ export async function request<T>(
   } = {},
 ): Promise<T> {
   if (!API_BASE) throw new Error("No API server configured.");
-  const response = await fetch(`${API_BASE}${path}`, {
+  const url = apiRequestUrl(API_BASE, path, location.origin);
+  const response = await fetch(url, {
     method: options.method || "GET",
     signal: options.signal || AbortSignal.timeout(10000),
     headers: {

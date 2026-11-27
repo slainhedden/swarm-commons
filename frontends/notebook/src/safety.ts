@@ -1,5 +1,15 @@
 import type { Goal } from "./data";
 
+export function apiRequestUrl(base: string, path: string, origin: string) {
+  const url = new URL(`${base}${path}`, origin);
+  const localHttp = url.protocol === "http:" &&
+    ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (url.protocol !== "https:" && !localHttp) {
+    throw new Error("Use an HTTPS community server, or HTTP on localhost for development.");
+  }
+  return url;
+}
+
 export function contributionPrompt(goal: Goal, agent: string) {
   const metadata = JSON.stringify({
     title: goal.title,
