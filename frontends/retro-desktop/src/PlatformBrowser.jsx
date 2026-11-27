@@ -105,6 +105,7 @@ export default function PlatformBrowser({ onDemo, notify }) {
   const [form, setForm] = useState(null);
   const [threadId, setThreadId] = useState(null);
   const [threadPage, setThreadPage] = useState(1);
+  const [replyPage, setReplyPage] = useState(1);
   const [thread, setThread] = useState(null);
   const [threadError, setThreadError] = useState("");
   const [queue, setQueue] = useState(null);
@@ -249,7 +250,7 @@ export default function PlatformBrowser({ onDemo, notify }) {
     const controller = new AbortController();
     let active = true;
     setThreadError("");
-    fetchJson(API_BASE, `/threads/${threadId}`, {
+    fetchJson(API_BASE, `/threads/${threadId}?page=${replyPage}`, {
       token,
       signal: controller.signal,
     })
@@ -268,7 +269,7 @@ export default function PlatformBrowser({ onDemo, notify }) {
       active = false;
       controller.abort();
     };
-  }, [threadId, token, revision]);
+  }, [threadId, replyPage, token, revision]);
   useEffect(() => {
     if (!token) {
       setQueue(null);
@@ -401,6 +402,16 @@ export default function PlatformBrowser({ onDemo, notify }) {
     setTasks(null);
     setThreadId(null);
     setForm(null);
+  };
+  const openThread = (id) => {
+    setThreadId(id);
+    setReplyPage(1);
+    setThread(null);
+    refresh();
+  };
+  const chooseReplyPage = (page) => {
+    setReplyPage(page);
+    setThread(null);
   };
   const copyTask = async (task) => {
     try {
@@ -1028,11 +1039,7 @@ export default function PlatformBrowser({ onDemo, notify }) {
                 <article key={t.id}>
                   <button
                     className="plain-goal"
-                    onClick={() => {
-                      setThreadId(t.id);
-                      if (threadId !== t.id) setThread(null);
-                      else refresh();
-                    }}
+                    onClick={() => openThread(t.id)}
                   >
                     <h4>{t.title}</h4>
                   </button>
@@ -1044,11 +1051,7 @@ export default function PlatformBrowser({ onDemo, notify }) {
                     <Vote kind="threads" item={t} />
                     <button
                       className="retro-button"
-                      onClick={() => {
-                        setThreadId(t.id);
-                        if (threadId !== t.id) setThread(null);
-                        else refresh();
-                      }}
+                      onClick={() => openThread(t.id)}
                     >
                       Read & reply
                     </button>
@@ -1134,6 +1137,23 @@ export default function PlatformBrowser({ onDemo, notify }) {
                       </article>
                     ))}
                     {!thread.comments.length && <p>No replies yet.</p>}
+                    <nav className="platform-actions" aria-label="Reply pages">
+                      <button
+                        className="retro-button"
+                        disabled={busy || replyPage === 1}
+                        onClick={() => chooseReplyPage(replyPage - 1)}
+                      >
+                        Earlier replies
+                      </button>
+                      <span aria-live="polite">Replies page {thread.comments_page ?? replyPage}</span>
+                      <button
+                        className="retro-button"
+                        disabled={busy || !thread.comments_next_page}
+                        onClick={() => chooseReplyPage(thread.comments_next_page)}
+                      >
+                        Later replies
+                      </button>
+                    </nav>
                     {session ? (
                       <PlatformForm
                         key={`${thread.id}:${session.handle}`}
@@ -1146,7 +1166,7 @@ export default function PlatformBrowser({ onDemo, notify }) {
                             await mutate(
                               `/threads/${thread.id}/comments`,
                               data,
-                              { message: "Reply posted." },
+                              { message: "Reply posted. Use Later replies to browse newer messages in a long discussion." },
                             ),
                           )
                         }
