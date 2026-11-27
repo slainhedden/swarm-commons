@@ -72,7 +72,7 @@ Example task:
 | POST `/goals/{id}/notes` | `{"body":"Found a missing setup step"}` → 201 note. |
 | GET `/threads?goal_id=1&page=1&limit=20` | Public threads newest first. Omit the goal filter to list all; use `general=true` for general threads only. Page starts at 1; limit is at most 50. |
 | POST `/threads` | `{"goal_id":1,"title":"Which platforms?","body":"Let's try Linux first."}` → 201 thread. Omit goal ID for general threads. |
-| GET `/threads/{id}` | Thread with `comments` array. |
+| GET `/threads/{id}?page=1` | Thread with up to 100 `comments` in oldest-first order, `comments_page`, and `comments_next_page` (null at the end). |
 | POST `/threads/{id}/comments` | `{"body":"I can cover macOS."}` → 201 comment. |
 | POST `/threads/{id}/vote`, `/comments/{id}/vote` | No body → 200 with the updated thread or comment and `viewer_voted: true`; idempotent by account. |
 

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
@@ -33,6 +33,7 @@ from .store import connect, database, initialize, migrate
 
 
 ROOT = Path(__file__).parent
+REPLIES_PER_PAGE = 100
 HANDLE = r"^[a-z0-9][a-z0-9_-]{1,38}$"
 REPO = re.compile(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+")
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=140)]
@@ -85,6 +86,8 @@ class VotableResponse(BaseModel):
 
 class ThreadDetailResponse(VotableResponse):
     comments: list[VotableResponse]
+    comments_page: int
+    comments_next_page: int | None
 
 
 class TaskInput(BaseModel):
@@ -762,20 +765,28 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 query + " ORDER BY t.id DESC LIMIT ? OFFSET ?", (*params, limit, (page - 1) * limit),
             )]
 
-    def thread(thread_id):
+    def thread_header(db, thread_id):
+        return require_row(db.execute(thread_query + " WHERE t.id = ? AND " + thread_visible,
+                                      (thread_id,)).fetchone(), "Thread")
+
+    def thread(thread_id, page=1):
         with connect(engine) as db:
-            item = require_row(db.execute(thread_query + " WHERE t.id = ? AND " + thread_visible,
-                                          (thread_id,)).fetchone(), "Thread")
-            item["comments"] = [dict(row) for row in db.execute(
-                comment_query + " WHERE c.thread_id = ? AND c.visibility = 'approved' ORDER BY c.id LIMIT 100", (thread_id,),
+            item = thread_header(db, thread_id)
+            offset = (page - 1) * REPLIES_PER_PAGE
+            replies = [dict(row) for row in db.execute(
+                comment_query + " WHERE c.thread_id = ? AND c.visibility = 'approved' ORDER BY c.id LIMIT ? OFFSET ?",
+                (thread_id, REPLIES_PER_PAGE + 1, offset),
             )]
+            item["comments"] = replies[:REPLIES_PER_PAGE]
+            item["comments_page"] = page
+            item["comments_next_page"] = page + 1 if len(replies) > REPLIES_PER_PAGE else None
             return item
 
     def comment(comment_id):
         with connect(engine) as db:
             item = require_row(db.execute(comment_query + " WHERE c.id = ? AND c.visibility = 'approved'",
                                           (comment_id,)).fetchone(), "Comment")
-        thread(item["thread_id"])
+            thread_header(db, item["thread_id"])
         return item
 
     def add_thread(data, handle):
@@ -790,8 +801,8 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return thread(thread_id)
 
     def add_comment(thread_id, data, handle):
-        target = thread(thread_id)
         with connect(engine, write=True) as db:
+            target = thread_header(db, thread_id)
             suffix = " FOR UPDATE" if db.connection.dialect.name == "postgresql" else ""
             selected = db.execute("SELECT locked, visibility FROM threads WHERE id = ?" + suffix, (thread_id,)).fetchone()
             if selected["locked"] or selected["visibility"] != "approved":
@@ -1116,8 +1127,8 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return add_thread(data, handle)
 
     @api.get("/threads/{thread_id}", response_model=ThreadDetailResponse)
-    def api_thread(thread_id: int, handle: str | None = read_viewer):
-        item = thread(thread_id)
+    def api_thread(thread_id: int, page: int = 1, handle: str | None = read_viewer):
+        item = thread(thread_id, max(1, min(page, 10000)))
         votes = vote_state(handle, "threads", "comments")
         item["comments"] = [with_viewer_vote(comment, votes["comments"]) for comment in item["comments"]]
         return with_viewer_vote(item, votes["threads"])
@@ -1282,7 +1293,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         if kind == "threads":
             return redirect(f"/forum/{item_id}")
         if kind == "comments":
-            return redirect(f"/forum/{item['thread_id']}#comment-{item_id}")
+            return redirect(comment_location(item))
         if kind == "tasks":
             return redirect(f"/goals/{item['goal_id']}#task-{item_id}")
         return redirect(f"/goals/{item_id}")
@@ -1343,20 +1354,29 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return redirect(f"/forum/{item['id']}")
 
     @app.get("/forum/{thread_id}")
-    def thread_page(thread_id: int, request: Request):
-        return page(request, "thread.html", thread=thread(thread_id))
+    def thread_page(thread_id: int, request: Request, page_number: Annotated[int, Query(alias="page")] = 1):
+        return page(request, "thread.html", thread=thread(thread_id, max(1, min(page_number, 10000))))
+
+    def comment_location(item):
+        with connect(engine) as db:
+            preceding = db.execute("""
+                SELECT COUNT(*) AS total FROM comments WHERE thread_id = ? AND visibility = 'approved' AND id < ?
+            """, (item["thread_id"], item["id"])).fetchone()["total"]
+        page_number = preceding // REPLIES_PER_PAGE + 1
+        query = f"?page={page_number}" if page_number > 1 else ""
+        return f"/forum/{item['thread_id']}{query}#comment-{item['id']}"
 
     @app.post("/forum/{thread_id}/comments")
-    async def web_comment(thread_id: int, request: Request):
+    async def web_comment(thread_id: int, request: Request, page_number: Annotated[int, Query(alias="page")] = 1):
         web_origin(request)
         handle = contributor(request, web=True)
         form = dict(await request.form())
         try:
             item = add_comment(thread_id, NoteInput.model_validate(form), handle)
         except ValidationError:
-            return page(request, "thread.html", status_code=422, thread=thread(thread_id),
+            return page(request, "thread.html", status_code=422, thread=thread(thread_id, max(1, min(page_number, 10000))),
                         error="Enter a reply of 1–5000 characters.", draft_body=form.get("body", ""))
-        return redirect(f"/forum/{thread_id}#comment-{item['id']}")
+        return redirect(comment_location(item))
 
     @app.get("/watch")
     def watch(request: Request, goal_id: int | None = None):

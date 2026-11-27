@@ -5,6 +5,8 @@ import pytest
 from fastapi.testclient import TestClient
 from support import approve, live_server, test_app
 
+from swarm_commons.store import connect, database
+
 
 PREFIX = "/api/v1"
 
@@ -196,6 +198,31 @@ def test_claim_race_heartbeat_and_expiration(app):
     now[0] += 120
     assert browser.get(f"{PREFIX}/tasks/{task}").json()["status"] == "open"
     assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=other).status_code == 200
+
+
+def test_thread_replies_paginate_and_post_redirects_to_reply(app):
+    browser, now = app
+    author = password_account(browser, "river")
+    thread = browser.post(f"{PREFIX}/threads", headers=author, json={"title": "Plan", "body": "Discuss"}).json()["id"]
+    engine = database(browser.app.state.test_path)
+    with connect(engine, write=True) as db:
+        for index in range(100):
+            db.execute("INSERT INTO comments (thread_id, author, body, created_at) VALUES (?, ?, ?, ?)",
+                       (thread, "river", f"Reply {index + 1}", now[0]))
+    engine.dispose()
+    browser.cookies.set("swarm_session", author["Authorization"].split()[1])
+    result = browser.post(f"/forum/{thread}/comments", data={"body": "Reply 101"}, follow_redirects=False)
+    assert result.status_code == 303
+    first = browser.get(f"{PREFIX}/threads/{thread}").json()
+    assert len(first["comments"]) == 100 and first["comments"][0]["body"] == "Reply 1"
+    second = browser.get(f"{PREFIX}/threads/{thread}?page=2").json()
+    assert [comment["body"] for comment in second["comments"]] == ["Reply 101"]
+    comment = second["comments"][0]["id"]
+    assert result.headers["location"] == f"/forum/{thread}?page=2#comment-{comment}"
+    assert f'id="comment-{comment}"' in browser.get(result.headers["location"]).text
+    assert 'href="?page=2"' in browser.get(f"/forum/{thread}").text
+    vote = browser.post(f"/vote/comments/{comment}", follow_redirects=False)
+    assert vote.headers["location"] == result.headers["location"]
 
 
 def test_notes_subtasks_forum_and_activity(app):
