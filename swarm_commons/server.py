@@ -512,7 +512,11 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             expire(db)
             item = require_row(db.execute(task_query + " WHERE t.id = ?", (task_id,)).fetchone(), "Task")
             if item["visibility"] != "approved" or item["goal_visibility"] != "approved":
-                raise HTTPException(409, "Task is not approved for work.")
+                if item["visibility"] == "pending" and item["goal_visibility"] == "approved" and (
+                    handle in {item["author"], item["goal_author"]} or role_in(db, handle) in {"admin", "moderator"}
+                ):
+                    raise HTTPException(409, "Task is not approved for work.")
+                raise HTTPException(404, "Task not found.")
             if item["status"] == "claimed" and item["claimant"] == handle:
                 return task_details(db, item, review=True)
             if item["status"] != "open" or not item["ready"]:
@@ -880,10 +884,15 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             staff = role_in(db, handle) in {"admin", "moderator"}
             goal_id = item_id if kind == "goals" else item.get("goal_id")
             if not staff:
-                if data.action != "approve" or kind != "tasks" or opaque_item(db, "goals", goal_id)["author"] != handle:
-                    raise HTTPException(403, "Moderator permission required.")
-                if not public_parents(db, kind, item):
+                owns_task_goal = kind == "tasks" and opaque_item(db, "goals", goal_id)["author"] == handle
+                if not public_parents(db, kind, item) or (
+                    item["visibility"] != "approved" and not (
+                        item["visibility"] == "pending" and (item["author"] == handle or owns_task_goal)
+                    )
+                ):
                     raise HTTPException(404, "Content not found.")
+                if data.action != "approve" or not owns_task_goal:
+                    raise HTTPException(403, "Moderator permission required.")
             if data.action in {"approve", "reject", "hide", "delete"}:
                 statuses = {"approve": "approved", "reject": "rejected", "hide": "hidden", "delete": "deleted"}
                 if item["visibility"] == "deleted":

@@ -81,6 +81,26 @@ def test_reports_do_not_reveal_children_of_hidden_parents(tmp_path):
                                     json=report).status_code == 404
 
 
+def test_claim_does_not_disclose_hidden_task_or_hidden_goal(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        outsider = contributor(browser, "outsider")
+        goal, task = proposal(browser, owner)
+        approved_task = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=owner, json=TASK).json()["id"]
+        approve(browser, "tasks", approved_task)
+        hide = {"action": "hide", "reason": "Removed"}
+        missing = browser.post(f"{PREFIX}/tasks/99999/claim", headers=outsider)
+        for kind, item, target in (("tasks", task, task), ("goals", goal, approved_task)):
+            assert browser.post(f"{PREFIX}/moderation/{kind}/{item}", headers=ADMIN, json=hide).status_code == 200
+            response = browser.post(f"{PREFIX}/tasks/{target}/claim", headers=outsider)
+            assert response.status_code == missing.status_code == 404
+            assert response.json() == missing.json()
+        for target in (goal, 99999):
+            response = browser.post(f"{PREFIX}/moderation/goals/{target}", headers=outsider, json=hide)
+            assert response.status_code == 404
+            assert response.json() == {"detail": "Content not found."}
+
+
 def test_limits_vote_age_locking_and_pagination(tmp_path):
     clock = [1000]
     with TestClient(test_app(tmp_path / "db.sqlite3", seed=False, clock=lambda: clock[0], vote_age=60,
