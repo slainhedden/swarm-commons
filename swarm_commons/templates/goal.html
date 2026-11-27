@@ -24,7 +24,26 @@
     <p class="preserve"><strong>Acceptance criteria:</strong> {{ task.criteria }}</p>
     {% if task.claimant %}<p>Contributor: @{{ task.claimant }}</p>{% endif %}
     {% if task.pr_url %}<p class="preserve"><a href="{{ task.pr_url }}" rel="noreferrer">Pull request ↗</a> · {{ task.summary }}</p>{% endif %}
-    {% if task.status == 'open' %}<p>Run locally with <code>swarm run {{ task.id }}</code>.</p>{% endif %}
+    {% if task.depends_on %}<p>Depends on {% for dependency in task.depends_on %}<a href="#task-{{ dependency }}">#{{ dependency }}</a>{% if not loop.last %}, {% endif %}{% endfor %}.</p>{% endif %}
+    {% if task.status == 'open' %}<p>{% if task.ready %}Run locally with <code>swarm run {{ task.id }}</code>.{% else %}Waiting for dependencies.{% endif %}</p>{% endif %}
+    {% if task.handoff %}
+    <details><summary>Structured handoff</summary>
+      {% if task.handoff.diff_url %}<a href="{{ task.handoff.diff_url }}" rel="noreferrer">Review changed files ↗</a>{% endif %}
+      {% for check in task.handoff.tests %}<p>{{ check.command }} · {{ check.outcome }}</p>{% endfor %}
+      {% for question in task.handoff.open_questions %}<p>Open question: {{ question }}</p>{% endfor %}
+    </details>
+    {% endif %}
+    {% if task.status in ['submitted', 'done'] %}
+      <p>{{ task.reviews|selectattr('approved')|list|length }} of {{ task.review_quorum }} required independent approvals</p>
+      {% for review in task.reviews %}<p>@{{ review.reviewer }} · {{ 'Approved' if review.approved else 'Changes requested' }} · {{ review.summary }}</p>{% endfor %}
+      {% if viewer and task.status == 'submitted' and viewer != task.claimant and viewer not in (task.reviews|map(attribute='reviewer')|list) %}
+      <form action="/tasks/{{ task.id }}/reviews" method="post" class="form">
+        <label for="review-{{ task.id }}">Independent review</label>
+        <input id="review-{{ task.id }}" name="summary" maxlength="5000" placeholder="What did you verify?" required>
+        <div class="actions"><button name="approved" value="true">Approve</button><button class="secondary" name="approved" value="false">Request changes</button></div>
+      </form>
+      {% endif %}
+    {% endif %}
     <div class="actions">
       {% if viewer %}
       <form action="/vote/tasks/{{ task.id }}" method="post"><button class="secondary">↑ Upvote · {{ task.votes }}</button></form>

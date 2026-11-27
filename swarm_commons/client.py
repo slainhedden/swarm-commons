@@ -11,6 +11,10 @@ class SwarmError(Exception):
     pass
 
 
+class SwarmUnavailable(SwarmError):
+    pass
+
+
 def server_url(value):
     try:
         parsed = urlsplit(value)
@@ -67,8 +71,10 @@ class Client:
     def request(self, method, path, **kwargs):
         try:
             response = self.http.request(method, f"api/v1/{path}", **kwargs)
+        except (httpx.NetworkError, httpx.TimeoutException):
+            raise SwarmUnavailable("Could not reach Swarm Commons.") from None
         except httpx.HTTPError:
-            raise SwarmError("Could not reach Swarm Commons.") from None
+            raise SwarmError("Invalid response from Swarm Commons.") from None
         if not response.is_success:
             try:
                 detail = response.json().get("detail")

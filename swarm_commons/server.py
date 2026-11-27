@@ -18,6 +18,10 @@ from pydantic import BaseModel, Field, StringConstraints, ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from .accounts import password_hash, token_hash, verify_password
+from .orchestration import (
+    READY_FILTER, Handoff, PathCheckInput, PathLeaseInput, ReviewInput,
+    check_paths, lease_path, register_dependencies,
+)
 from .store import connect, database, initialize, migrate
 
 
@@ -47,6 +51,7 @@ class TaskInput(BaseModel):
     title: Title
     description: Body
     criteria: Body
+    depends_on: list[int] = Field(default_factory=list, max_length=20)
 
 
 class SubtasksInput(BaseModel):
@@ -60,6 +65,7 @@ class NoteInput(BaseModel):
 class Submission(BaseModel):
     pr_url: Annotated[str, StringConstraints(strip_whitespace=True, max_length=300)]
     summary: Body
+    handoff: Handoff | None = None
 
 
 class ThreadInput(BaseModel):
@@ -86,11 +92,12 @@ def require_row(row, kind):
     return dict(row)
 
 
-def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, database_url=None):
+def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, database_url=None, review_quorum=None):
     path = Path(db_path or os.environ.get("SWARM_DB", "swarm.sqlite3"))
     database_url = database_url or (os.environ.get("DATABASE_URL") if db_path is None else None)
     engine = database(path, database_url)
     seed = os.environ.get("SWARM_SEED", "1") != "0" if seed is None else seed
+    review_quorum = max(1, int(os.environ.get("SWARM_REVIEW_QUORUM", "1"))) if review_quorum is None else review_quorum
 
     @asynccontextmanager
     async def lifespan(_):
@@ -180,6 +187,11 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         total = sum(counts.values())
         return {"total": total, **counts, "percent_done": counts["done"] * 100 // total if total else 0}
 
+    def with_progress(db, item):
+        item["progress"] = progress(db, item["id"])
+        item["status"] = "done" if item["progress"]["percent_done"] == 100 else "open"
+        return item
+
     def goals():
         with connect(engine, write=True) as db:
             expire(db)
@@ -188,9 +200,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                     (SELECT COUNT(*) FROM tasks WHERE goal_id = g.id) AS task_count
                 FROM goals g ORDER BY votes DESC, g.id
             """)]
-            for item in items:
-                item["progress"] = progress(db, item["id"])
-            return items
+            return [with_progress(db, item) for item in items]
 
     def goal(goal_id):
         with connect(engine, write=True) as db:
@@ -200,18 +210,35 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                     (SELECT COUNT(*) FROM tasks WHERE goal_id = g.id) AS task_count
                 FROM goals g WHERE id = ?
             """, (goal_id,)).fetchone(), "Goal")
-            item["progress"] = progress(db, goal_id)
-            return item
+            return with_progress(db, item)
 
     def featured():
         items = goals()
         return next((item for item in items if item["progress"]["percent_done"] < 100), items[0] if items else None)
 
-    task_query = """
+    task_query = f"""
         SELECT t.*, g.repo_url, g.title AS goal_title,
-            (SELECT COUNT(*) FROM task_votes WHERE task_id = t.id) AS votes
+            (SELECT COUNT(*) FROM task_votes WHERE task_id = t.id) AS votes,
+            ({READY_FILTER}) AS ready
         FROM tasks t JOIN goals g ON g.id = t.goal_id
     """
+
+    def task_details(db, item, *, review=False):
+        item["ready"] = bool(item["ready"])
+        item["depends_on"] = [row["dependency_id"] for row in db.execute("""
+            SELECT dependency_id FROM task_dependencies WHERE task_id = ? ORDER BY dependency_id
+        """, (item["id"],))]
+        if review:
+            row = db.execute("SELECT data FROM handoffs WHERE task_id = ?", (item["id"],)).fetchone()
+            item["handoff"] = json.loads(row["data"]) if row else None
+            item["reviews"] = [
+                {**result, "approved": bool(result["approved"])}
+                for result in db.execute("""
+                    SELECT reviewer, approved, summary, created_at FROM reviews WHERE task_id = ? ORDER BY created_at, reviewer
+                """, (item["id"],))
+            ]
+            item["review_quorum"] = review_quorum
+        return item
 
     def expire(db):
         db.execute("""
@@ -227,14 +254,16 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 conditions.append("t.goal_id = ?")
                 params = (goal_id,)
             if available:
-                conditions.append("t.status = 'open'")
+                conditions.extend(("t.status = 'open'", READY_FILTER))
             query = task_query + " WHERE " + " AND ".join(conditions) + " ORDER BY votes DESC, t.id"
-            return [dict(row) for row in db.execute(query, params)]
+            rows = [dict(row) for row in db.execute(query, params)]
+            return [task_details(db, row, review=True) for row in rows]
 
     def task(task_id):
         with connect(engine, write=True) as db:
             expire(db)
-            return require_row(db.execute(task_query + " WHERE t.id = ?", (task_id,)).fetchone(), "Task")
+            item = require_row(db.execute(task_query + " WHERE t.id = ?", (task_id,)).fetchone(), "Task")
+            return task_details(db, item, review=True)
 
     def add_goal(data, handle):
         url = repo_url(data.repo_url)
@@ -247,10 +276,12 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return goal(goal_id)
 
     def insert_task(db, goal_id, data, handle, parent_id=None):
-        return db.execute("""
+        task_id = db.execute("""
             INSERT INTO tasks (goal_id, parent_id, title, description, criteria, author)
             VALUES (?, ?, ?, ?, ?, ?) RETURNING id
         """, (goal_id, parent_id, data.title, data.description, data.criteria, handle)).fetchone()["id"]
+        register_dependencies(db, goal_id, task_id, data.depends_on)
+        return task_id
 
     def add_task(goal_id, data, handle):
         goal(goal_id)
@@ -287,12 +318,12 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             expire(db)
             item = require_row(db.execute(task_query + " WHERE t.id = ?", (task_id,)).fetchone(), "Task")
             if item["status"] == "claimed" and item["claimant"] == handle:
-                return item
-            if item["status"] != "open":
+                return task_details(db, item, review=True)
+            if item["status"] != "open" or not item["ready"]:
                 raise HTTPException(409, "Task is not available.")
-            updated = db.execute("""
-                UPDATE tasks SET status = 'claimed', claimant = ?, lease_until = ?
-                WHERE id = ? AND status = 'open'
+            updated = db.execute(f"""
+                UPDATE tasks AS t SET status = 'claimed', claimant = ?, lease_until = ?
+                WHERE id = ? AND status = 'open' AND {READY_FILTER}
             """, (handle, int(clock()) + lease_seconds, task_id))
             if not updated.rowcount:
                 raise HTTPException(409, "Task is not available.")
@@ -324,6 +355,10 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             """, (data.pr_url, data.summary, task_id, handle, int(clock())))
             if not updated.rowcount:
                 raise HTTPException(409, "Only the active claimant can submit a result.")
+            if data.handoff:
+                if data.handoff.diff_url and data.handoff.diff_url != data.pr_url + "/files":
+                    raise HTTPException(422, "Use the submitted PR's /files URL as the diff link.")
+                db.execute("INSERT INTO handoffs VALUES (?, ?)", (task_id, data.handoff.model_dump_json()))
             log(db, "submitted", "Submitted a pull request.", handle, item["goal_id"], task_id)
         return task(task_id)
 
@@ -337,11 +372,56 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 raise HTTPException(403, "Only the goal or task proposer can mark a result done.")
             if item["status"] != "submitted":
                 raise HTTPException(409, "A result must be submitted first.")
+            handoff = db.execute("SELECT data FROM handoffs WHERE task_id = ?", (task_id,)).fetchone()
+            checks = Handoff.model_validate_json(handoff["data"]).tests if handoff else []
+            if not checks or not any(check.outcome == "passed" for check in checks) or any(
+                check.outcome == "failed" for check in checks
+            ):
+                raise HTTPException(409, "A handoff with successful test results is required.")
+            review = db.execute("""
+                SELECT COUNT(*) AS approvals FROM reviews WHERE task_id = ? AND approved = 1
+            """, (task_id,)).fetchone()
+            if review["approvals"] < review_quorum:
+                raise HTTPException(409, f"At least {review_quorum} independent approvals are required.")
             updated = db.execute("UPDATE tasks SET status = 'done' WHERE id = ? AND status = 'submitted'", (task_id,))
             if not updated.rowcount:
                 raise HTTPException(409, "A result must be submitted first.")
             log(db, "done", "Marked a result done.", handle, item["goal_id"], task_id)
         return task(task_id)
+
+    def review_task(task_id, data, handle):
+        with connect(engine, write=True) as db:
+            item = require_row(db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone(), "Task")
+            if item["status"] != "submitted":
+                raise HTTPException(409, "Only a submitted task can be reviewed.")
+            if item["claimant"] == handle:
+                raise HTTPException(403, "Contributors cannot review their own result.")
+            saved = db.execute("""
+                INSERT INTO reviews VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
+            """, (task_id, handle, int(data.approved), data.summary, int(clock())))
+            if not saved.rowcount:
+                raise HTTPException(409, "A review from this contributor is already recorded.")
+            log(db, "reviewed", "Reviewed a submitted pull request.", handle, item["goal_id"], task_id)
+        return task(task_id)
+
+    def active_claim(db, task_id, handle, now):
+        suffix = " FOR UPDATE OF t" if db.connection.dialect.name == "postgresql" else ""
+        item = require_row(db.execute(task_query + " WHERE t.id = ?" + suffix, (task_id,)).fetchone(), "Task")
+        if item["status"] != "claimed" or item["claimant"] != handle or item["lease_until"] <= now:
+            raise HTTPException(409, "An active task claim is required.")
+        return item
+
+    def reserve_path(task_id, data, handle):
+        now = int(clock())
+        with connect(engine, write=True) as db:
+            item = active_claim(db, task_id, handle, now)
+            return lease_path(db, task=item, handle=handle, data=data, now=now)
+
+    def inspect_paths(task_id, data, handle):
+        now = int(clock())
+        with connect(engine, write=True) as db:
+            item = active_claim(db, task_id, handle, now)
+            return {"conflicts": check_paths(db, task=item, handle=handle, paths=data.paths, now=now)}
 
     def notes(goal_id):
         goal(goal_id)
@@ -386,6 +466,8 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             """, (now, now - 90)).fetchone())
 
     def log(db, kind, summary, actor, goal_id=None, task_id=None):
+        if db.connection.dialect.name == "postgresql":
+            db.execute("SELECT pg_advisory_xact_lock(90192731)")
         return dict(db.execute("""
             INSERT INTO events (goal_id, task_id, actor, kind, summary, created_at)
             VALUES (?, ?, ?, ?, ?, ?) RETURNING *
@@ -564,6 +646,18 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     @api.post("/tasks/{task_id}/done")
     def api_done(task_id: int, request: Request):
         return done(task_id, contributor(request))
+
+    @api.post("/tasks/{task_id}/reviews", status_code=201)
+    def api_review(task_id: int, data: ReviewInput, request: Request):
+        return review_task(task_id, data, contributor(request))
+
+    @api.post("/tasks/{task_id}/path-leases", status_code=201)
+    def api_lease(task_id: int, data: PathLeaseInput, request: Request):
+        return reserve_path(task_id, data, contributor(request))
+
+    @api.post("/tasks/{task_id}/paths/check")
+    def api_check(task_id: int, data: PathCheckInput, request: Request):
+        return inspect_paths(task_id, data, contributor(request))
 
     @api.get("/goals/{goal_id}/notes")
     def api_notes(goal_id: int):
@@ -745,6 +839,16 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def web_done(task_id: int, request: Request):
         web_origin(request)
         item = done(task_id, contributor(request, web=True))
+        return redirect(f"/goals/{item['goal_id']}#task-{task_id}")
+
+    @app.post("/tasks/{task_id}/reviews")
+    async def web_review(task_id: int, request: Request):
+        web_origin(request)
+        handle = contributor(request, web=True)
+        try:
+            item = review_task(task_id, ReviewInput.model_validate(dict(await request.form())), handle)
+        except ValidationError:
+            raise HTTPException(422, "Choose a verdict and enter a review note.") from None
         return redirect(f"/goals/{item['goal_id']}#task-{task_id}")
 
     @app.get("/forum")

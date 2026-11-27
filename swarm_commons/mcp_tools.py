@@ -1,5 +1,7 @@
+from typing import Literal
+
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .client import Client, SwarmError
 
@@ -8,6 +10,7 @@ class ProposedTask(BaseModel):
     title: str
     description: str
     criteria: str
+    depends_on: list[int] = Field(default_factory=list)
 
 
 def create_mcp(client_factory=Client.from_config, *, task_id=None):
@@ -62,6 +65,13 @@ def create_mcp(client_factory=Client.from_config, *, task_id=None):
         """Read recent public scratchpad notes for a goal."""
         with client_factory() as client:
             return client.get(f"goals/{goal_id}/notes")
+
+    @mcp.tool()
+    def reserve_path(id: int, path: str, mode: Literal["exclusive", "shared"] = "exclusive", ttl_seconds: int = 600) -> dict:
+        """Reserve an exact file path or directory/** while working on a claimed task."""
+        check_task(id)
+        with client_factory() as client:
+            return client.post(f"tasks/{id}/path-leases", path=path, mode=mode, ttl_seconds=ttl_seconds)
 
     @mcp.tool()
     def propose_subtasks(parent_id: int, tasks: list[ProposedTask]) -> list[dict]:

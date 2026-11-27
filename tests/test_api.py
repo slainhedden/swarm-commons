@@ -1,7 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
+from support import live_server
 
 from swarm_commons.server import create_app
 
@@ -69,13 +71,17 @@ def test_voting_progress_and_submission(app):
     assert browser.get(f"{PREFIX}/tasks?available=true").json()[0]["id"] == task
     assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=worker).json()["claimant"] == "casey"
     assert browser.get(f"{PREFIX}/tasks?goal_id={goal}&available=true").json() == []
-    data = {"pr_url": "https://github.com/example/docs/pull/42", "summary": "Added examples"}
+    data = {"pr_url": "https://github.com/example/docs/pull/42", "summary": "Added examples",
+            "handoff": {"files": ["README.md"], "tests": [{"command": "pytest", "outcome": "passed"}]}}
     assert browser.post(f"{PREFIX}/tasks/{task}/submit", headers=author, json=data).status_code == 409
     assert browser.post(f"{PREFIX}/tasks/{task}/submit", headers=worker, json={
         **data, "pr_url": "https://github.com/another/project/pull/1",
     }).status_code == 422
     assert browser.post(f"{PREFIX}/tasks/{task}/submit", headers=worker, json=data).json()["status"] == "submitted"
     assert browser.post(f"{PREFIX}/tasks/{task}/done", headers=worker).status_code == 403
+    assert browser.post(f"{PREFIX}/tasks/{task}/done", headers=author).status_code == 409
+    assert browser.post(f"{PREFIX}/tasks/{task}/reviews", headers=author,
+                        json={"approved": True, "summary": "Independently checked the PR."}).status_code == 201
     assert browser.post(f"{PREFIX}/tasks/{task}/done", headers=author).json()["status"] == "done"
     assert browser.get(f"{PREFIX}/goals/{goal}/progress").json()["percent_done"] == 100
     assert browser.get(f"{PREFIX}/goals/featured").json()["id"] == first
@@ -126,6 +132,13 @@ def test_notes_subtasks_forum_and_activity(app):
     event = browser.post(f"{PREFIX}/tasks/{task}/events", headers=author, json={"kind": "started", "summary": "Starting"})
     assert event.status_code == 201
     assert browser.get(f"{PREFIX}/activity?limit=1").json() == [event.json()]
+    event_id = event.json()["id"]
+    with live_server(browser.app) as url, httpx.stream(
+        "GET", f"{url}{PREFIX}/events/stream", params={"goal_id": goal},
+        headers={"Last-Event-ID": str(event_id - 1)}, timeout=5,
+    ) as stream:
+        assert stream.headers["content-type"].startswith("text/event-stream")
+        assert next(stream.iter_lines()) == f"id: {event_id}"
     assert browser.get(f"/goals/{goal}").status_code == 200
     assert browser.get(f"/forum/{thread}").status_code == 200
     assert browser.get("/watch").status_code == 200

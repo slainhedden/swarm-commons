@@ -2,11 +2,12 @@ import asyncio
 import os
 import subprocess
 from contextlib import nullcontext
-from pathlib import Path
 
 from fastapi.testclient import TestClient
+from support import live_server
 
 from swarm_commons import cli
+from swarm_commons.client import save_config
 from swarm_commons.mcp_tools import create_mcp
 from swarm_commons.server import create_app
 
@@ -60,16 +61,23 @@ def test_fake_run_against_local_bare_repo(tmp_path, monkeypatch, capsys):
     gh.chmod(0o755)
     monkeypatch.setenv("PATH", str(bin_path) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    with TestClient(create_app(tmp_path / "test.sqlite3", seed=False)) as browser:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    app = create_app(tmp_path / "test.sqlite3", seed=False)
+    with TestClient(app) as browser, live_server(app) as url:
         client, _, task = setup_browser(browser)
-        monkeypatch.setattr(cli.Client, "from_config", lambda: nullcontext(client))
+        save_config({"server": url, "token": client.headers["Authorization"].removeprefix("Bearer ")})
         monkeypatch.setattr("builtins.input", lambda _: "n")
         assert cli.main(["run", str(task["id"]), "--agent", "fake"]) == 0
         assert client.get(f"tasks/{task['id']}")["status"] == "open"
         answers = iter(("y", "y", "Tested a fake agent"))
         monkeypatch.setattr("builtins.input", lambda _: next(answers))
         assert cli.main(["run", str(task["id"]), "--agent", "fake"]) == 0
-        assert client.get(f"tasks/{task['id']}")["pr_url"] == "https://github.com/example/docs/pull/42"
+        completed = client.get(f"tasks/{task['id']}")
+        assert completed["pr_url"] == "https://github.com/example/docs/pull/42"
+        assert completed["handoff"]["files"] == ["SWARM-FAKE-RESULT.md"]
+        assert completed["handoff"]["turns"] == 1
+        worktree = next((tmp_path / "state" / "swarm-commons" / "workspaces").glob("*/worktree"))
+        assert (worktree / ".git").is_file()
         assert {item["kind"] for item in client.get("activity")} >= {"started", "finished", "submitted"}
         refs = git("for-each-ref", "--format=%(refname)", "refs/heads/swarm", cwd=remote).splitlines()
         assert len(refs) == 1
@@ -85,7 +93,7 @@ def test_mcp_tools_coordinate_with_the_api(tmp_path):
         async def exercise():
             tags = {tool.name for tool in await mcp.list_tools()}
             assert tags == {"list_goals", "list_tasks", "get_task", "claim_task", "post_note",
-                            "read_notes", "propose_subtasks", "submit_result"}
+                            "read_notes", "propose_subtasks", "submit_result", "reserve_path"}
             await mcp.call_tool("claim_task", {"id": task["id"]})
             await mcp.call_tool("post_note", {"goal_id": goal["id"], "body": "Finding from MCP"})
             await mcp.call_tool("propose_subtasks", {"parent_id": task["id"], "tasks": [
