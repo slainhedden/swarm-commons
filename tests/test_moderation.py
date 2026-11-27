@@ -99,6 +99,26 @@ def test_goal_owner_can_approve_pending_task_before_goal_is_public(tmp_path):
         assert browser.get(f"{PREFIX}/tasks/{task}").status_code == 404
 
 
+def test_hidden_subtask_heartbeat_does_not_hold_claim_capacity(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False, claim_cap=1)) as browser:
+        owner = contributor(browser, "owner")
+        worker = contributor(browser, "worker")
+        goal, parent = proposal(browser, owner)
+        task = browser.post(f"{PREFIX}/tasks/{parent}/subtasks", headers=owner, json={"tasks": [TASK]}).json()[0]["id"]
+        other = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=owner, json=TASK).json()["id"]
+        approve(browser, "tasks", task)
+        approve(browser, "tasks", other)
+        assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=worker).status_code == 200
+        assert browser.post(f"{PREFIX}/tasks/{other}/claim", headers=worker).status_code == 409
+        path = f"{PREFIX}/moderation/tasks/{parent}"
+        assert browser.post(path, headers=ADMIN, json={"action": "hide", "reason": "Removed"}).status_code == 200
+        assert browser.post(f"{PREFIX}/tasks/{task}/heartbeat", headers=worker).status_code != 200
+        assert browser.post(f"{PREFIX}/tasks/{other}/claim", headers=worker).status_code == 200
+        assert browser.post(path, headers=ADMIN, json={"action": "approve", "reason": "Restored"}).status_code == 200
+        restored = browser.get(f"{PREFIX}/tasks/{task}").json()
+        assert restored["status"] == "open" and restored["lease_until"] is None
+
+
 def test_ban_removes_activity_from_a_different_authors_task(tmp_path):
     with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
         owner = contributor(browser, "owner")

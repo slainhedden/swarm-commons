@@ -555,8 +555,10 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 return task_details(db, item, review=True)
             if item["status"] != "open" or not item["ready"]:
                 raise HTTPException(409, "Task is not available.")
-            active = db.execute("""
-                SELECT COUNT(*) AS count FROM tasks WHERE status = 'claimed' AND claimant = ?
+            active = db.execute(f"""
+                SELECT COUNT(*) AS count FROM tasks t JOIN goals g ON t.goal_id = g.id
+                WHERE t.status = 'claimed' AND t.claimant = ?
+                    AND t.visibility = 'approved' AND g.visibility = 'approved' AND {TASK_ANCESTORS_APPROVED}
             """, (handle,)).fetchone()["count"]
             if active >= claim_cap:
                 raise HTTPException(409, f"At most {claim_cap} active task claims per contributor.")
@@ -575,11 +577,11 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def heartbeat(task_id, handle):
         now = int(clock())
         with connect(engine, write=True) as db:
-            updated = db.execute("""
-                UPDATE tasks SET lease_until = ?, last_heartbeat = ?
+            updated = db.execute(f"""
+                UPDATE tasks AS t SET lease_until = ?, last_heartbeat = ?
                 WHERE id = ? AND status = 'claimed' AND claimant = ? AND lease_until > ?
-                    AND visibility = 'approved'
-                    AND EXISTS (SELECT 1 FROM goals WHERE goals.id = tasks.goal_id AND visibility = 'approved')
+                    AND visibility = 'approved' AND {TASK_ANCESTORS_APPROVED}
+                    AND EXISTS (SELECT 1 FROM goals WHERE goals.id = t.goal_id AND visibility = 'approved')
             """, (now + lease_seconds, now, task_id, handle, now))
             if not updated.rowcount:
                 raise HTTPException(409, "Only the active claimant can heartbeat.")
@@ -897,11 +899,14 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             return {"id": result["id"]}
 
     def reset_claim(db, task_id):
-        return db.execute("""
+        task = db.execute("""
             UPDATE tasks SET status = 'open', claimant = NULL, lease_until = NULL,
                 last_heartbeat = NULL, claimed_at = NULL
             WHERE id = ? AND status = 'claimed' RETURNING goal_id
         """, (task_id,)).fetchone()
+        if task:
+            db.execute("DELETE FROM path_leases WHERE task_id = ?", (task_id,))
+        return task
 
     def release(task_id, handle):
         with connect(engine, write=True) as db:
@@ -944,7 +949,11 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 db.execute(f"UPDATE {kind} SET visibility = ? WHERE id = ?", (statuses[data.action], item_id))
                 if data.action != "approve":
                     if kind == "tasks":
-                        reset_claim(db, item_id)
+                        for row in db.execute(f"""
+                            SELECT t.id FROM tasks t WHERE goal_id = ? AND status = 'claimed'
+                                AND (t.id = ? OR NOT ({TASK_ANCESTORS_APPROVED}))
+                        """, (goal_id, item_id)):
+                            reset_claim(db, row["id"])
                     elif kind == "goals":
                         for row in db.execute("SELECT id FROM tasks WHERE goal_id = ? AND status = 'claimed'", (item_id,)):
                             reset_claim(db, row["id"])
@@ -953,7 +962,6 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             elif data.action == "release" and kind == "tasks":
                 if reset_claim(db, item_id) is None:
                     raise HTTPException(409, "Task is not claimed.")
-                db.execute("DELETE FROM path_leases WHERE task_id = ?", (item_id,))
             elif data.action == "reject_submission" and kind == "tasks":
                 changed = db.execute("""
                     UPDATE tasks SET status = 'open', claimant = NULL, claimed_at = NULL,
@@ -1014,9 +1022,10 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             db.execute("DELETE FROM sessions WHERE handle = ?", (target,))
             for table in ("goals", "tasks", "threads", "comments", "notes"):
                 db.execute(f"UPDATE {table} SET visibility = 'hidden' WHERE author = ? AND visibility <> 'deleted'", (target,))
-            for item in db.execute("""
-                SELECT id FROM tasks WHERE status = 'claimed' AND (claimant = ? OR visibility = 'hidden'
-                    OR EXISTS (SELECT 1 FROM goals WHERE goals.id = tasks.goal_id AND visibility = 'hidden'))
+            for item in db.execute(f"""
+                SELECT t.id FROM tasks t WHERE status = 'claimed' AND (claimant = ? OR visibility = 'hidden'
+                    OR NOT ({TASK_ANCESTORS_APPROVED})
+                    OR EXISTS (SELECT 1 FROM goals WHERE goals.id = t.goal_id AND visibility = 'hidden'))
             """, (target,)):
                 reset_claim(db, item["id"])
             for table in ("goal_votes", "task_votes", "thread_votes", "comment_votes"):
