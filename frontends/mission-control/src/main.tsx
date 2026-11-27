@@ -1116,8 +1116,8 @@ function App() {
               : t,
           ),
         );
+        form.reset();
       }
-      form.reset();
     } catch (e) {
       setFormError(
         posted
