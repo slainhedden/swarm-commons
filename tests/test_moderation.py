@@ -81,6 +81,23 @@ def test_reports_do_not_reveal_children_of_hidden_parents(tmp_path):
                                     json=report).status_code == 404
 
 
+def test_ban_removes_activity_from_a_different_authors_task(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        worker = contributor(browser, "worker")
+        _, task = proposal(browser, owner)
+        assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=worker).status_code == 200
+        event = browser.post(f"{PREFIX}/tasks/{task}/events", headers=worker,
+                             json={"kind": "progress", "summary": "Public run message"}).json()
+        assert event in browser.get(f"{PREFIX}/activity").json()
+        assert browser.post(f"{PREFIX}/moderation/contributors/worker/ban", headers=ADMIN,
+                            json={"reason": "Suspended"}).status_code == 200
+        assert browser.get(f"{PREFIX}/tasks/{task}").status_code == 200
+        events = browser.get(f"{PREFIX}/activity").json()
+        assert all(item["actor"] != "worker" for item in events)
+        assert any(item["kind"] == "moderated" for item in events)
+
+
 def test_claim_does_not_disclose_hidden_task_or_hidden_goal(tmp_path):
     with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
         owner = contributor(browser, "owner")

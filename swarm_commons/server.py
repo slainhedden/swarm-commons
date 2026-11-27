@@ -705,6 +705,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
 
     def activity(limit=20, goal_id=None, after=None):
         conditions, params = [
+            "NOT EXISTS (SELECT 1 FROM contributors c WHERE c.handle = events.actor AND c.banned = 1)",
             "(goal_id IS NULL OR EXISTS (SELECT 1 FROM goals g WHERE g.id = events.goal_id AND g.visibility = 'approved'))",
             "(task_id IS NULL OR EXISTS (SELECT 1 FROM tasks t WHERE t.id = events.task_id AND t.visibility = 'approved'))",
         ], ()
