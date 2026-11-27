@@ -111,8 +111,30 @@ export type ApiThread = {
   body: string;
   created_at: number;
   comment_count: number;
-  comments?: { author: string; body: string }[];
+  comments?: { id: number; author: string; body: string }[];
+  comments_page?: number;
+  comments_next_page?: number | null;
 };
+export function thread(id: number, page = 1) {
+  return request<ApiThread>(`/threads/${id}?page=${page}`);
+}
+export async function threadWithReply(id: number, replyId: number) {
+  const first = await thread(id);
+  if (first.comments?.some((comment) => comment.id === replyId)) return first;
+  // Replies are oldest-first, with 100 per API page. Other contributors may
+  // post after us, so find our exact reply rather than assuming it is last.
+  let page = Math.max(1, Math.ceil(first.comment_count / 100));
+  let detail = page === 1 ? first : await thread(id, page);
+  while (page > 1 && (detail.comments?.[0]?.id ?? Infinity) > replyId) {
+    page -= 1;
+    detail = page === 1 ? first : await thread(id, page);
+  }
+  if (!detail.comments?.some((comment) => comment.id === replyId))
+    throw new Error(
+      "Your reply was posted, but is not currently visible. Reload the discussion to check it.",
+    );
+  return detail;
+}
 export type ApiActivity = {
   id: number;
   actor: string;
@@ -139,7 +161,9 @@ export async function snapshot(threadPage = 1): Promise<Snapshot> {
     request<ApiGoal[]>("/goals"),
     request<ApiGoal | null>("/goals/featured"),
     request<ApiTask[]>("/tasks"),
-    request<ApiThread[]>(`/threads?page=${threadPage}&limit=${THREAD_PAGE_SIZE}`),
+    request<ApiThread[]>(
+      `/threads?page=${threadPage}&limit=${THREAD_PAGE_SIZE}`,
+    ),
     request<ApiActivity[]>("/activity?limit=30"),
     request<Snapshot["stats"]>("/stats"),
   ]);
@@ -158,7 +182,9 @@ export async function snapshot(threadPage = 1): Promise<Snapshot> {
     // A full page is not proof that another page exists. The API has no total
     // count, so look ahead before offering navigation to an empty page.
     threads.length === THREAD_PAGE_SIZE
-      ? request<ApiThread[]>(`/threads?page=${threadPage + 1}&limit=${THREAD_PAGE_SIZE}`)
+      ? request<ApiThread[]>(
+          `/threads?page=${threadPage + 1}&limit=${THREAD_PAGE_SIZE}`,
+        )
       : [],
   ]);
   if (!Array.isArray(olderThreads))

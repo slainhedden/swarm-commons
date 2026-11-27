@@ -58,6 +58,7 @@ type Thread = {
   author: string;
   category: string;
   replies: string[];
+  replyCount?: number;
   time: string;
 };
 type Modal =
@@ -577,6 +578,23 @@ function App() {
       ? remote.goals.filter((g) => g.viewer_voted).map((g) => g.id)
       : voteLedger[user] || [];
   const [selectedThread, setSelectedThread] = useState<number | null>(null);
+  const selectedThreadRef = useRef<number | null>(null);
+  const [replyPage, setReplyPage] = useState(1);
+  const replyPageRef = useRef(1);
+  const [replyDetail, setReplyDetail] = useState<api.ApiThread | null>(null);
+  const [repliesLoading, setRepliesLoading] = useState(false);
+  function selectThread(id: number | null) {
+    selectedThreadRef.current = id;
+    replyPageRef.current = 1;
+    setReplyPage(1);
+    setReplyDetail(null);
+    setRepliesLoading(false);
+    setSelectedThread(id);
+  }
+  function changeReplyPage(page: number) {
+    replyPageRef.current = page;
+    setReplyPage(page);
+  }
   const [category, setCategory] = useState("All transmissions");
   const [layer, setLayer] = useState("Agents");
   const [search, setSearch] = useState("");
@@ -625,9 +643,8 @@ function App() {
         body: t.body,
         author: t.author,
         category: t.goal_id ? "Mission discussion" : "Getting started",
-        replies:
-          t.comments?.map((c) => `${c.author}: ${c.body}`) ||
-          Array.from({ length: t.comment_count }, () => "Loading comment…"),
+        replies: [],
+        replyCount: t.comment_count,
         time: timeAgo(t.created_at),
       })),
     );
@@ -635,7 +652,7 @@ function App() {
   function changeThreadPage(nextPage: number) {
     threadPageRef.current = nextPage;
     setThreadPage(nextPage);
-    setSelectedThread(null);
+    selectThread(null);
   }
   async function refresh() {
     const currentPage = threadPageRef.current;
@@ -711,27 +728,38 @@ function App() {
   useEffect(() => {
     if (!live || selectedThread === null) return;
     let disposed = false;
+    setRepliesLoading(true);
     api
-      .request<api.ApiThread>(`/threads/${selectedThread}`)
+      .thread(selectedThread, replyPage)
       .then((t) => {
-        if (!disposed)
-          setThreads((ts) =>
-            ts.map((old) =>
-              old.id === t.id
-                ? {
-                    ...old,
-                    replies:
-                      t.comments?.map((c) => `${c.author}: ${c.body}`) || [],
-                  }
-                : old,
-            ),
-          );
+        if (
+          !disposed &&
+          selectedThreadRef.current === t.id &&
+          replyPageRef.current === replyPage
+        )
+          setReplyDetail(t);
       })
-      .catch((e) => setToast(e.message));
+      .catch((e) => {
+        if (
+          !disposed &&
+          selectedThreadRef.current === selectedThread &&
+          replyPageRef.current === replyPage
+        ) {
+          setToast(e.message);
+          changeReplyPage(
+            replyDetail?.id === selectedThread
+              ? replyDetail.comments_page || 1
+              : 1,
+          );
+        }
+      })
+      .finally(() => {
+        if (!disposed) setRepliesLoading(false);
+      });
     return () => {
       disposed = true;
     };
-  }, [selectedThread, live, remote?.threads]);
+  }, [selectedThread, live, remote?.threads, replyPage]);
   useEffect(() => {
     setFormError("");
   }, [modal, isComposer, authMode]);
@@ -792,7 +820,7 @@ function App() {
     const close = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setIsComposer(false);
-        setSelectedThread(null);
+        selectThread(null);
       }
     };
     document.addEventListener("keydown", close);
@@ -1059,22 +1087,40 @@ function App() {
     if (!body || !thread) return;
     setBusy(true);
     setFormError("");
+    let posted = false;
     try {
-      if (live)
-        await api.request(`/threads/${thread.id}/comments`, {
-          method: "POST",
-          body: JSON.stringify({ body }),
-        });
-      setThreads((ts) =>
-        ts.map((t) =>
-          t.id === thread.id
-            ? { ...t, replies: [...t.replies, `${user}: ${body}`] }
-            : t,
-        ),
-      );
+      if (live) {
+        const comment = await api.request<{ id: number }>(
+          `/threads/${thread.id}/comments`,
+          {
+            method: "POST",
+            body: JSON.stringify({ body }),
+          },
+        );
+        posted = true;
+        form.reset();
+        const detail = await api.threadWithReply(thread.id, comment.id);
+        if (selectedThreadRef.current === thread.id) {
+          changeReplyPage(detail.comments_page || 1);
+          setReplyDetail(detail);
+        }
+        await refresh();
+      } else {
+        setThreads((ts) =>
+          ts.map((t) =>
+            t.id === thread.id
+              ? { ...t, replies: [...t.replies, `${user}: ${body}`] }
+              : t,
+          ),
+        );
+      }
       form.reset();
     } catch (e) {
-      setFormError((e as Error).message);
+      setFormError(
+        posted
+          ? `Reply posted. Could not refresh the discussion: ${(e as Error).message}`
+          : (e as Error).message,
+      );
     } finally {
       setBusy(false);
     }
@@ -1164,11 +1210,21 @@ function App() {
     sort === "Newest first" ? b.id - a.id : b.votes - a.votes,
   );
   const thread = threads.find((t) => t.id === selectedThread);
+  const currentReplyDetail =
+    replyDetail?.id === selectedThread ? replyDetail : null;
+  const threadReplies = live
+    ? currentReplyDetail?.comments?.map(
+        (comment) => `${comment.author}: ${comment.body}`,
+      ) || []
+    : thread?.replies || [];
+  const threadReplyCount = live
+    ? (currentReplyDetail?.comment_count ?? thread?.replyCount ?? 0)
+    : threadReplies.length;
   const close = () => {
     setModal(null);
     setNode("");
     setIsComposer(false);
-    setSelectedThread(null);
+    selectThread(null);
   };
   const showDialog = modal || node || isComposer || thread;
   const navItems: { name: Page; icon: LucideIcon; count?: string }[] = [
@@ -1876,7 +1932,10 @@ function App() {
                 </button>
               </div>
               <div className="community-layout">
-                <div className="panel discussion-list" aria-busy={threadsLoading}>
+                <div
+                  className="panel discussion-list"
+                  aria-busy={threadsLoading}
+                >
                   {threads
                     .filter(
                       (t) =>
@@ -1887,7 +1946,7 @@ function App() {
                       <button
                         className="discussion-row"
                         key={t.id}
-                        onClick={() => setSelectedThread(t.id)}
+                        onClick={() => selectThread(t.id)}
                       >
                         <span className={`avatar thread-avatar color-${i % 3}`}>
                           {t.author.slice(0, 2).toUpperCase()}
@@ -1902,7 +1961,7 @@ function App() {
                         </div>
                         <span className="reply-count">
                           <MessageSquare size={15} />
-                          {t.replies.length}
+                          {t.replyCount ?? t.replies.length}
                         </span>
                       </button>
                     ))}
@@ -2719,11 +2778,12 @@ function App() {
                   <small>{thread.time}</small>
                 </div>
                 <p className="thread-body">{thread.body}</p>
-                <h3 className="modal-subheading">
-                  {thread.replies.length} replies
-                </h3>
-                <div className="thread-replies">
-                  {thread.replies.map((r, i) => (
+                <h3 className="modal-subheading">{threadReplyCount} replies</h3>
+                {live && !currentReplyDetail && repliesLoading && (
+                  <p role="status">Loading replies…</p>
+                )}
+                <div className="thread-replies" aria-busy={repliesLoading}>
+                  {threadReplies.map((r, i) => (
                     <div key={i}>
                       <span className="avatar">
                         <Users size={14} />
@@ -2732,6 +2792,44 @@ function App() {
                     </div>
                   ))}
                 </div>
+                {live && currentReplyDetail && (
+                  <nav
+                    className="discussion-pagination"
+                    aria-label="Reply pages"
+                  >
+                    <button
+                      className="button secondary"
+                      disabled={
+                        busy ||
+                        repliesLoading ||
+                        (currentReplyDetail.comments_page || 1) === 1
+                      }
+                      onClick={() =>
+                        changeReplyPage(
+                          (currentReplyDetail.comments_page || 1) - 1,
+                        )
+                      }
+                    >
+                      Earlier replies
+                    </button>
+                    <span aria-live="polite">
+                      Replies page {currentReplyDetail.comments_page || 1}
+                    </span>
+                    <button
+                      className="button secondary"
+                      disabled={
+                        busy ||
+                        repliesLoading ||
+                        !currentReplyDetail.comments_next_page
+                      }
+                      onClick={() =>
+                        changeReplyPage(currentReplyDetail.comments_next_page!)
+                      }
+                    >
+                      Later replies
+                    </button>
+                  </nav>
+                )}
                 {user ? (
                   <form onSubmit={reply}>
                     <label>
@@ -2752,7 +2850,7 @@ function App() {
                     <button
                       className="button primary"
                       type="submit"
-                      disabled={busy}
+                      disabled={busy || (live && repliesLoading)}
                     >
                       {busy ? "Sending…" : "Send reply"} <Send size={15} />
                     </button>
@@ -2761,7 +2859,7 @@ function App() {
                   <button
                     className="button primary"
                     onClick={() => {
-                      setSelectedThread(null);
+                      selectThread(null);
                       setModal("login");
                     }}
                   >

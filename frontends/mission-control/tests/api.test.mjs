@@ -205,7 +205,9 @@ test("loads older discussion pages and disables older navigation on a partial la
           : Array.from({ length: 20 }, (_, i) => ({ id: 21 - i }))
         : path === "/stats"
           ? { agents_running: 0, contributors: 0, prs_merged: 0 }
-          : path === "/goals/featured" ? null : [],
+          : path === "/goals/featured"
+            ? null
+            : [],
     );
   };
   const latest = await adapter.snapshot();
@@ -228,7 +230,9 @@ test("does not offer an empty page after an exactly full final discussion page",
         ? discussions.slice((page - 1) * 20, page * 20)
         : target.pathname.endsWith("/stats")
           ? { agents_running: 0, contributors: 0, prs_merged: 0 }
-          : target.pathname.endsWith("/featured") ? null : [],
+          : target.pathname.endsWith("/featured")
+            ? null
+            : [],
     );
   };
   assert.equal((await adapter.snapshot()).hasOlderThreads, true);
@@ -236,4 +240,54 @@ test("does not offer an empty page after an exactly full final discussion page",
   assert.equal(lastPage.threads.length, 20);
   assert.equal(lastPage.threads.at(-1).id, 1);
   assert.equal(lastPage.hasOlderThreads, false);
+});
+
+function replyPages(total) {
+  const paths = [];
+  globalThis.fetch = async (url) => {
+    const target = new URL(url);
+    paths.push(target.pathname + target.search);
+    const page = Number(target.searchParams.get("page"));
+    const comments = Array.from({ length: total }, (_, i) => ({
+      id: i + 1,
+      author: "river",
+      body: `Reply ${i + 1}`,
+    }));
+    return Response.json({
+      id: 7,
+      comment_count: total,
+      comments_page: page,
+      comments_next_page: page * 100 < total ? page + 1 : null,
+      comments: comments.slice((page - 1) * 100, page * 100),
+    });
+  };
+  return paths;
+}
+
+test("reads replies beyond the first hundred and respects the final page cursor", async () => {
+  const paths = replyPages(101);
+  const detail = await adapter.thread(7, 2);
+  assert.equal(detail.comments[0].id, 101);
+  assert.equal(detail.comments_page, 2);
+  assert.equal(detail.comments_next_page, null);
+  assert.deepEqual(paths, ["/api/v1/threads/7?page=2"]);
+});
+
+test("locates a newly posted reply on its actual page after a page boundary", async () => {
+  replyPages(201);
+  const detail = await adapter.threadWithReply(7, 201);
+  assert.equal(detail.comments_page, 3);
+  assert.equal(detail.comments[0].id, 201);
+});
+
+test("another contributor posting later cannot move our reply onto the wrong page", async () => {
+  const paths = replyPages(201);
+  const detail = await adapter.threadWithReply(7, 200);
+  assert.equal(detail.comments_page, 2);
+  assert.equal(detail.comments.at(-1).id, 200);
+  assert.deepEqual(paths, [
+    "/api/v1/threads/7?page=1",
+    "/api/v1/threads/7?page=3",
+    "/api/v1/threads/7?page=2",
+  ]);
 });
