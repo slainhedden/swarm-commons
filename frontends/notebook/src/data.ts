@@ -184,3 +184,21 @@ export function store(key: string, value: unknown) {
     /* Private browsing can disable storage. */
   }
 }
+
+// Read at mutation time, not from a possibly stale tab's React snapshot.
+// Web Locks serialize read/modify/write across tabs where supported.
+export async function updateStored<T>(
+  key: string,
+  fallback: T,
+  update: (current: T) => T,
+): Promise<T> {
+  const commit = () => {
+    const next = update(readStored(key, fallback));
+    store(key, next);
+    return next;
+  };
+  if (typeof navigator !== "undefined" && navigator.locks) {
+    return navigator.locks.request(`swarm-notebook:${key}`, commit);
+  }
+  return commit();
+}

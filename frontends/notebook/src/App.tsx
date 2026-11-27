@@ -33,6 +33,7 @@ import {
   notes as demoNotes,
   readStored,
   store,
+  updateStored,
   type Goal,
   type Note,
 } from "./data";
@@ -325,6 +326,19 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
   useEffect(() => {
+    const syncDemo = (event: StorageEvent) => {
+      if (event.key !== null && !["votes", "profile", "proposals", "comments", "notes"]
+        .some((key) => event.key === `swarm-notebook:${key}`)) return;
+      setVotes(readStored("votes", []));
+      setProfile(readStored("profile", ""));
+      setProposals(readStored("proposals", []));
+      setComments(readStored("comments", {}));
+      setLocalNotes(readStored("notes", []));
+    };
+    window.addEventListener("storage", syncDemo);
+    return () => window.removeEventListener("storage", syncDemo);
+  }, []);
+  useEffect(() => {
     const handle = () =>
       setTab(
         tabs.find(
@@ -420,11 +434,9 @@ export default function App() {
       }
       return;
     }
-    const next = votes.includes(id)
-      ? votes.filter((value) => value !== id)
-      : [...votes, id];
-    setVotes(next);
-    store("votes", next);
+    setVotes(await updateStored("votes", votes, (current) => current.includes(id)
+      ? current.filter((value) => value !== id)
+      : [...current, id]));
   }
   async function signIn(event: FormEvent) {
     event.preventDefault();
@@ -526,10 +538,10 @@ export default function App() {
       }
       return;
     }
-    const next = [
-      ...proposals,
+    const next = await updateStored<Goal[]>("proposals", proposals, (current) => [
+      ...current,
       {
-        id: `local-${Date.now()}`,
+        id: `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         title: idea.trim(),
         description: ideaDescription.trim(),
         category: "Community",
@@ -538,9 +550,8 @@ export default function App() {
         progress: 0,
         agents: 0,
       },
-    ];
+    ]);
     setProposals(next);
-    store("proposals", next);
     setModal(null);
     setIdea("");
     setIdeaDescription("");
@@ -581,15 +592,14 @@ export default function App() {
       }
       return;
     }
-    const next = {
-      ...comments,
+    const next = await updateStored("comments", comments, (current) => ({
+      ...current,
       [thread.id]: [
-        ...(comments[thread.id] || []),
+        ...(current[thread.id] || []),
         { name: profile || "A friendly builder", body: comment.trim() },
       ],
-    };
+    }));
     setComments(next);
-    store("comments", next);
     setComment("");
   }
   async function addThread(event: FormEvent) {
@@ -618,9 +628,9 @@ export default function App() {
         setBusy(false);
       }
     } else {
-      const next: Note[] = [
+      const next = await updateStored<Note[]>("notes", localNotes, (current) => [
         {
-          id: `note-${Date.now()}`,
+          id: `note-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           name: profile || "A friendly builder",
           initials: (profile || "FB").slice(0, 2).toUpperCase(),
           color: "green",
@@ -631,10 +641,9 @@ export default function App() {
           time: "Just now",
           category: "community",
         },
-        ...localNotes,
-      ];
+        ...current,
+      ]);
       setLocalNotes(next);
-      store("notes", next);
     }
     setNoteTitle("");
     setNoteBody("");
