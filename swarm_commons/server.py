@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, BeforeValidator, Field, StringConstraints, ValidationError
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from .accounts import password_hash, token_hash, verify_password
@@ -71,6 +71,20 @@ class GoalResponse(GoalInput):
     created_at: int
     status: Literal["open", "done"]
     progress: ProgressResponse
+    viewer_voted: bool = False
+
+
+class VotableResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: int
+    votes: int
+    viewer_voted: bool
+
+
+class ThreadDetailResponse(VotableResponse):
+    comments: list[VotableResponse]
+
 
 class TaskInput(BaseModel):
     title: Title
@@ -233,6 +247,12 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return contributor(request)
 
     auth = Depends(authenticate_request)
+
+    def optional_viewer(request: Request, response: Response):
+        response.headers["Cache-Control"] = "private, no-store"
+        return viewer(request)
+
+    read_viewer = Depends(optional_viewer)
 
     def role_in(db, handle):
         if not handle:
@@ -406,6 +426,17 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             log(db, "task_proposed", "Proposed a task.", handle, goal_id, task_id)
         return task(task_id, any_visibility=True)
 
+    def vote_state(handle, *kinds):
+        if not handle:
+            return {kind: set() for kind in kinds}
+        with connect(engine) as db:
+            return {kind: {row["id"] for row in db.execute(
+                f"SELECT {kind[:-1]}_id AS id FROM {kind[:-1]}_votes WHERE handle = ?", (handle,),
+            )} for kind in kinds}
+
+    def with_viewer_vote(item, voted):
+        return {**item, "viewer_voted": item["id"] in voted}
+
     def vote(kind, item_id, handle, *, remove=False):
         if kind == "goals":
             goal(item_id)
@@ -437,7 +468,12 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 ):
                     raise HTTPException(403, "Voting requires a password account past its new-account waiting period.")
                 db.execute(f"INSERT INTO {table} VALUES (?, ?) ON CONFLICT DO NOTHING", (item_id, handle))
-        return get_item(item_id)
+        item = get_item(item_id)
+        item["viewer_voted"] = not remove
+        if kind == "threads":
+            voted_comments = vote_state(handle, "comments")["comments"]
+            item["comments"] = [with_viewer_vote(comment, voted_comments) for comment in item["comments"]]
+        return item
 
     def claim(task_id, handle):
         with connect(engine, write=True) as db:
@@ -910,20 +946,24 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return {"handle": handle}
 
     @api.get("/goals", response_model=list[GoalResponse])
-    def api_goals():
-        return goals()
+    def api_goals(handle: str | None = read_viewer):
+        voted = vote_state(handle, "goals")["goals"]
+        return [with_viewer_vote(item, voted) for item in goals()]
 
     @api.post("/goals", status_code=201, response_model=GoalResponse)
     def api_add_goal(data: GoalInput, handle: str = auth):
         return add_goal(data, handle)
 
     @api.get("/goals/featured", response_model=GoalResponse | None)
-    def api_featured():
-        return featured()
+    def api_featured(handle: str | None = read_viewer):
+        item = featured()
+        if item is None:
+            return None
+        return with_viewer_vote(item, vote_state(handle, "goals")["goals"])
 
     @api.get("/goals/{goal_id}", response_model=GoalResponse)
-    def api_goal(goal_id: int, request: Request):
-        return goal(goal_id, viewer(request))
+    def api_goal(goal_id: int, handle: str | None = read_viewer):
+        return with_viewer_vote(goal(goal_id, handle), vote_state(handle, "goals")["goals"])
 
     @api.get("/goals/{goal_id}/progress", response_model=ProgressResponse)
     def api_progress(goal_id: int):
@@ -933,21 +973,22 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def api_add_task(goal_id: int, data: TaskInput, handle: str = auth):
         return add_task(goal_id, data, handle)
 
-    @api.get("/tasks")
-    def api_tasks(goal_id: int | None = None, available: bool = False):
+    @api.get("/tasks", response_model=list[VotableResponse])
+    def api_tasks(goal_id: int | None = None, available: bool = False, handle: str | None = read_viewer):
         if goal_id is not None:
             goal(goal_id)
-        return tasks(goal_id, available)
+        voted = vote_state(handle, "tasks")["tasks"]
+        return [with_viewer_vote(item, voted) for item in tasks(goal_id, available)]
 
-    @api.get("/tasks/{task_id}")
-    def api_task(task_id: int, request: Request):
-        return task(task_id, viewer(request))
+    @api.get("/tasks/{task_id}", response_model=VotableResponse)
+    def api_task(task_id: int, handle: str | None = read_viewer):
+        return with_viewer_vote(task(task_id, handle), vote_state(handle, "tasks")["tasks"])
 
-    @api.post("/{kind}/{item_id}/vote")
+    @api.post("/{kind}/{item_id}/vote", response_model=VotableResponse)
     def api_vote(kind: Literal["goals", "tasks", "threads", "comments"], item_id: int, handle: str = auth):
         return vote(kind, item_id, handle)
 
-    @api.delete("/{kind}/{item_id}/vote")
+    @api.delete("/{kind}/{item_id}/vote", response_model=VotableResponse)
     def api_unvote(kind: Literal["goals", "tasks", "threads", "comments"], item_id: int, handle: str = auth):
         return vote(kind, item_id, handle, remove=True)
 
@@ -1032,17 +1073,23 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @api.get("/threads")
-    def api_threads(goal_id: int | None = None, general: bool = False, page: int = 1, limit: int = 20):
-        return threads(goal_id, general, max(1, min(page, 10000)), max(1, min(limit, 50)))
+    @api.get("/threads", response_model=list[VotableResponse])
+    def api_threads(goal_id: int | None = None, general: bool = False, page: int = 1, limit: int = 20,
+                    handle: str | None = read_viewer):
+        voted = vote_state(handle, "threads")["threads"]
+        items = threads(goal_id, general, max(1, min(page, 10000)), max(1, min(limit, 50)))
+        return [with_viewer_vote(item, voted) for item in items]
 
     @api.post("/threads", status_code=201)
     def api_add_thread(data: ThreadInput, handle: str = auth):
         return add_thread(data, handle)
 
-    @api.get("/threads/{thread_id}")
-    def api_thread(thread_id: int):
-        return thread(thread_id)
+    @api.get("/threads/{thread_id}", response_model=ThreadDetailResponse)
+    def api_thread(thread_id: int, handle: str | None = read_viewer):
+        item = thread(thread_id)
+        votes = vote_state(handle, "threads", "comments")
+        item["comments"] = [with_viewer_vote(comment, votes["comments"]) for comment in item["comments"]]
+        return with_viewer_vote(item, votes["threads"])
 
     @api.post("/threads/{thread_id}/comments", status_code=201)
     def api_comment(thread_id: int, data: NoteInput, handle: str = auth):
@@ -1070,18 +1117,11 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
 
     app.include_router(api)
 
-    def vote_state(handle):
-        if not handle:
-            return {}
-        with connect(engine) as db:
-            return {kind: {row["id"] for row in db.execute(
-                f"SELECT {kind[:-1]}_id AS id FROM {kind[:-1]}_votes WHERE handle = ?", (handle,),
-            )} for kind in ("goals", "tasks", "threads", "comments")}
-
     def page(request, template, *, status_code=200, **context):
         handle = viewer(request, web=True)
         return templates.TemplateResponse(
-            request=request, name=template, context={"viewer": handle, "my_votes": vote_state(handle), **context},
+            request=request, name=template,
+            context={"viewer": handle, "my_votes": vote_state(handle, "goals", "tasks", "threads", "comments"), **context},
             status_code=status_code,
         )
 

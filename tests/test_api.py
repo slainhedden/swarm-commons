@@ -95,6 +95,49 @@ def test_voting_progress_and_submission(app):
     assert browser.get(f"{PREFIX}/leaderboard").json() == [{"handle": "casey", "contributions": 1, "done": 1}]
 
 
+def test_viewer_vote_state_for_public_reads_and_vote_responses(app):
+    browser, _ = app
+    author = contributor(browser, "river")
+    voter = password_account(browser, "casey")
+    goal, task = proposal(browser, author)
+    thread = browser.post(f"{PREFIX}/threads", headers=author, json={
+        "goal_id": goal, "title": "Discussion", "body": "Details",
+    }).json()["id"]
+    comment = browser.post(f"{PREFIX}/threads/{thread}/comments", headers=author, json={"body": "Reply"}).json()["id"]
+    targets = (f"goals/{goal}", f"tasks/{task}", f"threads/{thread}", f"comments/{comment}")
+
+    def check_reads(expected, headers=None):
+        for collection, detail, item_id in (
+            ("goals", targets[0], goal), ("tasks", targets[1], task), ("threads", targets[2], thread),
+        ):
+            listed = browser.get(f"{PREFIX}/{collection}", headers=headers).raise_for_status()
+            item = next(item for item in listed.json() if item["id"] == item_id)
+            assert item["viewer_voted"] is expected
+            response = browser.get(f"{PREFIX}/{detail}", headers=headers).raise_for_status()
+            assert response.headers["Cache-Control"] == "private, no-store"
+            assert response.json()["viewer_voted"] is expected
+            if collection == "threads":
+                assert response.json()["comments"][0]["viewer_voted"] is expected
+        assert browser.get(f"{PREFIX}/goals/featured", headers=headers).json()["viewer_voted"] is expected
+
+    for target in reversed(targets):
+        updated = browser.post(f"{PREFIX}/{target}/vote", headers=voter).raise_for_status().json()
+        assert updated["votes"] == 1 and updated["viewer_voted"] is True
+        if target == targets[2]:
+            assert updated["comments"][0]["viewer_voted"] is True
+    check_reads(False)
+    check_reads(False, author)
+    check_reads(True, voter)
+    browser.post(f"{PREFIX}/auth/login", json={
+        "username": "casey", "password": "a unique passphrase",
+    }).raise_for_status()
+    check_reads(True)
+    for target in targets:
+        updated = browser.delete(f"{PREFIX}/{target}/vote").raise_for_status().json()
+        assert updated["votes"] == 0 and updated["viewer_voted"] is False
+    check_reads(False)
+
+
 def test_claim_race_heartbeat_and_expiration(app):
     browser, now = app
     first = contributor(browser, "alfa")
