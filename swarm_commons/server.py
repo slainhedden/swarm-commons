@@ -6,6 +6,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
@@ -152,6 +153,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     review_quorum = max(1, int(os.environ.get("SWARM_REVIEW_QUORUM", "1"))) if review_quorum is None else review_quorum
     vote_age = int(os.environ.get("SWARM_VOTE_MIN_AGE_SECONDS", "600")) if vote_age is None else vote_age
     goal_quota = max(1, int(os.environ.get("SWARM_GOAL_DAILY_LIMIT", "3")))
+    trust_railway_client_ip = os.environ.get("SWARM_TRUST_RAILWAY_CLIENT_IP") == "1"
     pr_checker = pr_checker or (check_github_pr if os.environ.get("SWARM_CHECK_GITHUB_PRS", "1") == "1" else
                                 lambda *_: "unverified")
 
@@ -281,11 +283,21 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             """, (key, minute)).fetchone()["hits"]
         return count <= (signup_limit if signup_attempt else write_limit)
 
+    def rate_limit_ip(request):
+        if trust_railway_client_ip:
+            forwarded = request.headers.get("X-Real-IP")
+            if forwarded:
+                try:
+                    return str(ip_address(forwarded))
+                except ValueError:
+                    pass
+        return request.client.host if request.client else "unknown"
+
     @app.middleware("http")
     async def rate_limit(request, call_next):
         if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             path = request.url.path
-            ip = request.client.host if request.client else "unknown"
+            ip = rate_limit_ip(request)
             signup_attempt = path in {"/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/contributors", "/join"}
             handle = None if signup_attempt else await run_in_threadpool(viewer, request)
             if not await run_in_threadpool(count_write, ip, handle, signup_attempt):

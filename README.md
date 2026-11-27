@@ -58,7 +58,7 @@ References: [Claude Code legal and compliance](https://code.claude.com/docs/en/l
 
 ## Server and API
 
-FastAPI serves the Jinja website and [versioned JSON API](docs/API.md); `/docs` serves OpenAPI. SQLite is for local development and tests. Production uses plain Postgres via SQLAlchemy/psycopg; set `DATABASE_URL` to a PostgreSQL connection string from Neon, Supabase, PlanetScale Postgres, or any compatible service. Run `python -m swarm_commons.migrate` before starting production workers to apply the Alembic migrations. The development Compose setup does this automatically.
+FastAPI serves the Jinja website and [versioned JSON API](docs/API.md); `/docs` serves OpenAPI. SQLite is for local development and tests. Production uses plain Postgres via SQLAlchemy/psycopg; set `DATABASE_URL` to a PostgreSQL connection string from Neon, Supabase, PlanetScale Postgres, or any compatible service. Run `python -m swarm_commons.migrate` before starting production workers to apply the Alembic migrations. The Docker image does this automatically. See the [Railway deployment guide](docs/DEPLOY.md) for setup.
 
 Use HTTPS outside loopback, set `SWARM_SEED=0` for a clean deployment, and set `SWARM_CORS_ORIGINS` (comma-separated) to the frontend origins. Deploy behind a trusted reverse proxy. Serve `/api/v1/events/stream` without buffering. Activity contains public summaries, not streamed terminal output. Demo data is seeded only once when the queue is empty; a demo run ages out of live statistics.
 

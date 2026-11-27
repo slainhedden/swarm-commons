@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 from support import ADMIN, approve, test_app
 from test_api import PREFIX, contributor, password_account, proposal
@@ -69,6 +70,20 @@ def test_limits_vote_age_locking_and_pagination(tmp_path):
         for _ in range(2):
             assert browser.post(f"{PREFIX}/goals", json=GOAL, headers=voter).status_code == 201
         assert browser.post(f"{PREFIX}/goals", json=GOAL, headers=voter).status_code == 429
+
+
+@pytest.mark.parametrize("trust_proxy", (False, True))
+def test_railway_rate_limits_use_edge_ip_only_when_configured(tmp_path, monkeypatch, trust_proxy):
+    monkeypatch.setenv("SWARM_TRUST_RAILWAY_CLIENT_IP", "1" if trust_proxy else "0")
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False, clock=lambda: 1000, signup_limit=1)) as browser:
+        def signup(handle, ip):
+            return browser.post(f"{PREFIX}/contributors", json={"handle": handle}, headers={"X-Real-IP": ip}).status_code
+
+        assert signup("first", "192.0.2.1") == 201
+        assert signup("second", "192.0.2.1") == 429
+        assert signup("third", "192.0.2.2") == (201 if trust_proxy else 429)
+        assert signup("fourth", "invalid") == (201 if trust_proxy else 429)
+        assert signup("fifth", "also-invalid") == 429
 
 
 def test_cors_headers_on_rejected_writes(tmp_path, monkeypatch):
