@@ -26,10 +26,25 @@ test("stale demo tabs preserve each other's proposals, votes, notes, and replies
   ]);
 });
 
-test("blocked browser storage still permits in-memory demo edits", async () => {
+test("quota failures reject each edit instead of claiming old storage contains the new note", async () => {
+  const saved = JSON.stringify([{ id: "already saved" }]);
+  globalThis.localStorage = {
+    getItem: () => saved,
+    setItem() { throw new DOMException("Quota exceeded", "QuotaExceededError"); },
+  };
+  for (const id of ["first unsaved draft", "second unsaved draft"]) {
+    await assert.rejects(
+      updateStored("notes", [], (current) => [{ id }, ...current]),
+      /could not save/,
+    );
+    assert.deepEqual(readStored("notes", []), [{ id: "already saved" }]);
+  }
+});
+
+test("blocked browser storage rejects edits rather than reporting a durable save", async () => {
   globalThis.localStorage = {
     getItem() { throw new Error("Storage blocked"); },
     setItem() { throw new Error("Storage blocked"); },
   };
-  assert.deepEqual(await updateStored("votes", ["existing"], (current) => [...current, "new"]), ["existing", "new"]);
+  await assert.rejects(updateStored("votes", ["existing"], (current) => [...current, "new"]), /could not save/);
 });

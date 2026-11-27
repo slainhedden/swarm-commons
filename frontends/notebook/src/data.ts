@@ -180,8 +180,9 @@ export function readStored<T>(key: string, fallback: T): T {
 export function store(key: string, value: unknown) {
   try {
     localStorage.setItem(`swarm-notebook:${key}`, JSON.stringify(value));
+    return true;
   } catch {
-    /* Private browsing can disable storage. */
+    return false;
   }
 }
 
@@ -194,7 +195,9 @@ export async function updateStored<T>(
 ): Promise<T> {
   const commit = () => {
     const next = update(readStored(key, fallback));
-    store(key, next);
+    if (!store(key, next)) {
+      throw new Error("This browser could not save your change. Free some browser storage and try again.");
+    }
     return next;
   };
   if (typeof navigator !== "undefined" && navigator.locks) {

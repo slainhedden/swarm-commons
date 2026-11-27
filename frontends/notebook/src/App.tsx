@@ -399,6 +399,23 @@ export default function App() {
     setModal("login");
     return false;
   }
+  async function saveDemo<T>(
+    key: string,
+    fallback: T,
+    update: (current: T) => T,
+    setValue: (value: T) => void,
+  ) {
+    setRequestError("");
+    try {
+      setValue(await updateStored(key, fallback, update));
+      return true;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "This browser could not save your change.";
+      setRequestError(message);
+      setToast(message);
+      return false;
+    }
+  }
   async function vote(id: string) {
     if (live) {
       if (!requireSession() || busy) return;
@@ -435,9 +452,9 @@ export default function App() {
       }
       return;
     }
-    setVotes(await updateStored("votes", votes, (current) => current.includes(id)
+    await saveDemo("votes", votes, (current) => current.includes(id)
       ? current.filter((value) => value !== id)
-      : [...current, id]));
+      : [...current, id], setVotes);
   }
   async function signIn(event: FormEvent) {
     event.preventDefault();
@@ -539,7 +556,7 @@ export default function App() {
       }
       return;
     }
-    const next = await updateStored<Goal[]>("proposals", proposals, (current) => [
+    if (!await saveDemo<Goal[]>("proposals", proposals, (current) => [
       ...current,
       {
         id: `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -551,8 +568,7 @@ export default function App() {
         progress: 0,
         agents: 0,
       },
-    ]);
-    setProposals(next);
+    ], setProposals)) return;
     setModal(null);
     setIdea("");
     setIdeaDescription("");
@@ -593,14 +609,13 @@ export default function App() {
       }
       return;
     }
-    const next = await updateStored("comments", comments, (current) => ({
+    if (!await saveDemo("comments", comments, (current) => ({
       ...current,
       [thread.id]: [
         ...(current[thread.id] || []),
         { name: profile || "A friendly builder", body: comment.trim() },
       ],
-    }));
-    setComments(next);
+    }), setComments)) return;
     setComment("");
   }
   async function addThread(event: FormEvent) {
@@ -629,7 +644,7 @@ export default function App() {
         setBusy(false);
       }
     } else {
-      const next = await updateStored<Note[]>("notes", localNotes, (current) => [
+      if (!await saveDemo<Note[]>("notes", localNotes, (current) => [
         {
           id: `note-${Date.now()}-${Math.random().toString(36).slice(2)}`,
           name: profile || "A friendly builder",
@@ -643,8 +658,7 @@ export default function App() {
           category: "community",
         },
         ...current,
-      ]);
-      setLocalNotes(next);
+      ], setLocalNotes)) return;
     }
     setNoteTitle("");
     setNoteBody("");

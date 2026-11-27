@@ -25,6 +25,8 @@ The production build is served on port 4173. To serve a new App version alongsid
 
 The default is an intentionally labeled, interactive demo. Votes, proposed goals, discussion notes, replies, and a password-free demo name tag are saved in this browser only. Nothing is published and no coding agent is launched. Sample activity is explicitly labeled; “watch the build” shows illustrative agents rather than pretending to stream real sessions.
 
+If browser storage is full or disabled, collection writes show an error rather than claim a save. Proposal, note, and reply drafts stay open and unchanged for retry; failed votes do not change the displayed selection.
+
 Set `VITE_API_BASE` before building to enable the Swarm Commons API v1 adapter:
 
 ```sh
