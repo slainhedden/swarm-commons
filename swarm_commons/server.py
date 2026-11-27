@@ -818,10 +818,30 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             raise HTTPException(404, "Unknown content type.")
         return require_row(db.execute(f"SELECT * FROM {kind} WHERE id = ?", (item_id,)).fetchone(), "Content")
 
+    def public_parents(db, kind, item):
+        if kind == "comments":
+            parent = opaque_item(db, "threads", item["thread_id"])
+            if parent["visibility"] != "approved":
+                return False
+            item = parent
+        goal_id = item.get("goal_id")
+        if goal_id is not None and opaque_item(db, "goals", goal_id)["visibility"] != "approved":
+            return False
+        if kind == "tasks" and item["parent_id"] is not None:
+            hidden_parent = db.execute("""
+                WITH RECURSIVE ancestors(id, parent_id, visibility) AS (
+                    SELECT id, parent_id, visibility FROM tasks WHERE id = ?
+                    UNION ALL
+                    SELECT t.id, t.parent_id, t.visibility FROM tasks t JOIN ancestors a ON t.id = a.parent_id
+                ) SELECT 1 FROM ancestors WHERE visibility <> 'approved' LIMIT 1
+            """, (item["parent_id"],)).fetchone()
+            return hidden_parent is None
+        return True
+
     def report_content(kind, item_id, data, handle):
         with connect(engine, write=True) as db:
             item = opaque_item(db, kind, item_id)
-            if item["visibility"] != "approved":
+            if item["visibility"] != "approved" or not public_parents(db, kind, item):
                 raise HTTPException(404, "Content not found.")
             result = db.execute("""
                 INSERT INTO reports (kind, item_id, reporter, reason, created_at)
@@ -862,6 +882,8 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             if not staff:
                 if data.action != "approve" or kind != "tasks" or opaque_item(db, "goals", goal_id)["author"] != handle:
                     raise HTTPException(403, "Moderator permission required.")
+                if not public_parents(db, kind, item):
+                    raise HTTPException(404, "Content not found.")
             if data.action in {"approve", "reject", "hide", "delete"}:
                 statuses = {"approve": "approved", "reject": "rejected", "hide": "hidden", "delete": "deleted"}
                 if item["visibility"] == "deleted":

@@ -56,6 +56,31 @@ def test_code_and_markup_are_preserved_as_text(tmp_path):
         assert "<img src=x" not in rendered
 
 
+def test_reports_do_not_reveal_children_of_hidden_parents(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        outsider = contributor(browser, "outsider")
+        goal, task = proposal(browser, owner)
+        thread = browser.post(f"{PREFIX}/threads", headers=owner, json={
+            "goal_id": goal, "title": "Topic", "body": "Discussion",
+        }).json()["id"]
+        reply = browser.post(f"{PREFIX}/threads/{thread}/comments", headers=owner, json={"body": "Reply"}).json()["id"]
+        note = browser.post(f"{PREFIX}/goals/{goal}/notes", headers=owner, json={"body": "Note"}).json()["id"]
+        child = browser.post(f"{PREFIX}/tasks/{task}/subtasks", headers=owner, json={"tasks": [TASK]}).json()[0]["id"]
+        approve(browser, "tasks", child)
+        hide = {"action": "hide", "reason": "Removed"}
+        report = {"reason": "Report"}
+        for kind, parent, children in (
+            ("tasks", task, [("tasks", child)]),
+            ("threads", thread, [("comments", reply)]),
+            ("goals", goal, [("tasks", task), ("threads", thread), ("notes", note), ("comments", reply)]),
+        ):
+            assert browser.post(f"{PREFIX}/moderation/{kind}/{parent}", headers=ADMIN, json=hide).status_code == 200
+            for child_kind, child_id in children:
+                assert browser.post(f"{PREFIX}/{child_kind}/{child_id}/report", headers=outsider,
+                                    json=report).status_code == 404
+
+
 def test_limits_vote_age_locking_and_pagination(tmp_path):
     clock = [1000]
     with TestClient(test_app(tmp_path / "db.sqlite3", seed=False, clock=lambda: clock[0], vote_age=60,
