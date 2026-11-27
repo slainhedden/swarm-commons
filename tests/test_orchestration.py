@@ -81,6 +81,34 @@ def test_review_rejects_a_previous_submission_even_for_the_same_pr(tmp_path):
         assert browser.post(f"{route}/reviews", headers=author, json=review).status_code == 201
 
 
+def test_hidden_completed_dependency_is_not_available(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        author = contributor(browser, "author")
+        builder = contributor(browser, "builder")
+        goal, upstream = proposal(browser, author)
+        downstream = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=author, json={
+            "title": "Follow-up", "description": "Continue setup", "criteria": "Review", "depends_on": [upstream],
+        }).json()["id"]
+        approve(browser, "tasks", downstream)
+        route = f"{PREFIX}/tasks/{upstream}"
+        assert browser.post(f"{route}/claim", headers=builder).status_code == 200
+        submitted = browser.post(f"{route}/submit", headers=builder, json={
+            "pr_url": "https://github.com/example/docs/pull/2", "summary": "Ready",
+            "handoff": {"tests": [{"command": "pytest", "outcome": "passed"}]},
+        }).json()
+        assert browser.post(f"{route}/reviews", headers=author, json={
+            "submission_id": submitted["submission_id"], "approved": True, "summary": "Reviewed",
+        }).status_code == 201
+        assert browser.post(f"{route}/done", headers=author).status_code == 200
+        assert browser.get(f"{PREFIX}/tasks/{downstream}").json()["ready"]
+        assert browser.post(f"{PREFIX}/moderation/tasks/{upstream}", headers=ADMIN,
+                            json={"action": "hide", "reason": "Removed"}).status_code == 200
+        assert browser.get(route, headers=builder).status_code == 404
+        assert not browser.get(f"{PREFIX}/tasks/{downstream}").json()["ready"]
+        assert browser.get(f"{PREFIX}/tasks?available=true").json() == []
+        assert browser.post(f"{PREFIX}/tasks/{downstream}/claim", headers=builder).status_code == 409
+
+
 def test_path_reservations_span_goals_and_expire(tmp_path):
     now = [1000]
     with TestClient(test_app(tmp_path / "test.sqlite3", seed=False, clock=lambda: now[0])) as browser:

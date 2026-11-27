@@ -43,7 +43,7 @@ class PathCheckInput(BaseModel):
 READY_FILTER = """
     NOT EXISTS (
         SELECT 1 FROM task_dependencies d JOIN tasks upstream ON upstream.id = d.dependency_id
-        WHERE d.task_id = t.id AND upstream.status <> 'done'
+        WHERE d.task_id = t.id AND (upstream.status <> 'done' OR upstream.visibility <> 'approved')
     )
 """
 

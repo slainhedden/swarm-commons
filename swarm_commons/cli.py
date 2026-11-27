@@ -220,6 +220,8 @@ def run_task(client, args):
         if args.agent != "codex" or not launcher.is_absolute() or not os.access(launcher, os.X_OK) or not launcher.is_file():
             raise SwarmError("--codex-external-launcher requires an absolute executable path and --agent codex.")
     policy = load_policy()
+    if task.get("ready") is False:
+        raise SwarmError("This task has prerequisites that are unfinished or unavailable.")
     upstream = []
     for dependency_id in task.get("depends_on", ()):
         dependency = client.get(f"tasks/{dependency_id}")
