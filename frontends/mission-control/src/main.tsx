@@ -185,6 +185,7 @@ const events = [
 function useStored<T>(
   key: string,
   initial: T,
+  persist = true,
 ): [T, React.Dispatch<React.SetStateAction<T>>] {
   const [value, setValue] = useState<T>(() => {
     try {
@@ -194,8 +195,8 @@ function useStored<T>(
     }
   });
   useEffect(() => {
-    localStorage.setItem(key, JSON.stringify(value));
-  }, [key, value]);
+    if (persist) localStorage.setItem(key, JSON.stringify(value));
+  }, [key, value, persist]);
   return [value, setValue];
 }
 function Mark({ small = false }: { small?: boolean }) {
@@ -536,10 +537,13 @@ function App() {
   const [modal, setModal] = useState<Modal>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const scope = api.API_BASE ? `:${api.API_BASE}` : "";
+  const [remote, setRemote] = useState<api.Snapshot | null>(null);
   const [user, setUser] = useStored(`swarm.mc.user${scope}`, "");
+  // Live snapshots must not overwrite browser-local fallback contributions.
   const [goals, setGoals] = useStored<Goal[]>(
     `swarm.mc.goals${scope}`,
     initialGoals,
+    !remote,
   );
   const [voteLedger, setVoteLedger] = useStored<Record<string, number[]>>(
     `swarm.mc.vote-ledger${scope}`,
@@ -555,8 +559,8 @@ function App() {
   const [threads, setThreads] = useStored<Thread[]>(
     `swarm.mc.threads${scope}`,
     initialThreads,
+    !remote,
   );
-  const [remote, setRemote] = useState<api.Snapshot | null>(null);
   const [connection, setConnection] = useState(
     api.API_BASE ? "connecting" : "demo",
   );
@@ -647,8 +651,6 @@ function App() {
       .catch(() => {
         if (!disposed) {
           setConnection("fallback");
-          setGoals(initialGoals);
-          setThreads(initialThreads);
           setUser("");
         }
       });
