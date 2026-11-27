@@ -7,7 +7,7 @@ import {
   safeUrl,
 } from "./client.js";
 import {
-  adoptGuestDrafts,
+  adoptReplyDrafts,
   editReplyDraft,
   emptyDrafts,
   readReplyDraft,
@@ -1008,7 +1008,7 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
                         );
                         changeIdentity();
                         setReplyDrafts(
-                          adoptGuestDrafts(replyDrafts, identity.handle),
+                          adoptReplyDrafts(replyDrafts, identity.handle),
                         );
                         setUser({ handle: identity.handle });
                       },

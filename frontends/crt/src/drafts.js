@@ -15,6 +15,9 @@ export function editReplyDraft(drafts, handle, threadId, value) {
   };
 }
 
-export function adoptGuestDrafts(drafts, handle) {
-  return { owner: handle, values: drafts.owner === null ? drafts.values : {} };
+export function adoptReplyDrafts(drafts, handle) {
+  return {
+    owner: handle,
+    values: drafts.owner === null || drafts.owner === handle ? drafts.values : {},
+  };
 }
