@@ -180,10 +180,14 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     templates.env.filters["utc"] = lambda seconds: datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="seconds")
     app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
-    def session(db, handle, *, permanent=False):
+    def session(db, handle, *, permanent=False, source=None):
         token = "swarm_" + secrets.token_urlsafe(32)
         expires = None if permanent else int(clock()) + 30 * 24 * 3600
-        db.execute("INSERT INTO sessions VALUES (?, ?, ?)", (token_hash(token), handle, expires))
+        if source is not None and source["expires_at"] is not None:
+            expires = min(expires, source["expires_at"])
+        db.execute("""
+            INSERT INTO sessions (token_hash, handle, expires_at, source_token_hash) VALUES (?, ?, ?, ?)
+        """, (token_hash(token), handle, expires, source["token_hash"] if source else None))
         return {"handle": handle, "token": token}
 
     def signup(handle, password=None):
@@ -221,27 +225,32 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def valid_session_token(token):
         return token.startswith("swarm_") and len(token) == 49
 
-    def session_owner(db, token):
-        row = db.execute("""
-            SELECT s.handle FROM sessions s JOIN contributors c ON c.handle = s.handle
+    def session_record(db, token, *, source=False):
+        query = """
+            SELECT s.token_hash, s.handle, s.expires_at FROM sessions s JOIN contributors c ON c.handle = s.handle
             WHERE s.token_hash = ? AND c.banned = 0 AND (s.expires_at IS NULL OR s.expires_at > ?)
-        """, (token_hash(token), int(clock()))).fetchone()
-        return row["handle"] if row else None
+        """
+        if source:
+            query += " AND s.source_token_hash IS NULL"
+            if db.connection.dialect.name == "postgresql":
+                query += " FOR KEY SHARE OF s"
+        return db.execute(query, (token_hash(token), int(clock()))).fetchone()
 
     def active_session(token):
         if not valid_session_token(token):
             return None
         with connect(engine) as db:
-            return session_owner(db, token)
+            record = session_record(db, token)
+        return record["handle"] if record else None
 
     def browser_session_from_token(token):
         if not valid_session_token(token):
             raise HTTPException(401, "Swarm contributor token not recognized.")
         with connect(engine, write=True) as db:
-            handle = session_owner(db, token)
-            if not handle:
+            source = session_record(db, token, source=True)
+            if not source:
                 raise HTTPException(401, "Swarm contributor token not recognized.")
-            return session(db, handle)
+            return session(db, source["handle"], source=source)
 
     def viewer(request, *, web=False):
         return active_session(request_token(request, web=web))

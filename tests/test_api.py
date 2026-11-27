@@ -80,6 +80,23 @@ def test_web_token_sign_in_and_sign_out_preserves_cli_session(app):
     assert browser.get(f"{PREFIX}/me", headers={"Authorization": f"Bearer {web_token}"}).status_code == 401
 
 
+@pytest.mark.parametrize("revoke_source", [False, True])
+def test_browser_session_cannot_outlive_an_expiring_source(app, revoke_source):
+    browser, now = app
+    source = password_account(browser, "token-owner")
+    token = source["Authorization"].split()[1]
+    now[0] += 30 * 24 * 3600 - 1
+    assert browser.post("/join", data={"action": "token", "token": token}, follow_redirects=False).status_code == 303
+    assert browser.get(f"{PREFIX}/me").status_code == 200
+    if revoke_source:
+        child = browser.cookies.get("swarm_session")
+        assert browser.post(f"{PREFIX}/auth/logout", headers=source).status_code == 200
+        browser.cookies.set("swarm_session", child)
+    else:
+        now[0] += 1
+    assert browser.get(f"{PREFIX}/me").status_code == 401
+
+
 def test_optional_auth_rejects_invalid_bearer_but_accepts_anonymous_reads(tmp_path, monkeypatch):
     origin = "http://localhost:5185"
     monkeypatch.setenv("SWARM_CORS_ORIGINS", origin)
