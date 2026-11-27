@@ -14,13 +14,16 @@ def test_proposal_approval_note_reports_and_ban(tmp_path):
         worker = contributor(browser, "worker")
         created = browser.post(f"{PREFIX}/goals", json=GOAL, headers=owner).json()
         goal = created["id"]
-        assert created["visibility"] == "pending" and created["title"] == "Docs"
+        assert created["visibility"] == "pending" and created["title"] == GOAL["title"]
         assert browser.get(f"{PREFIX}/goals").json() == []
         assert browser.get(f"{PREFIX}/goals/{goal}").status_code == 404
         assert browser.get(f"{PREFIX}/goals/{goal}", headers=owner).status_code == 200
         decision = {"action": "approve", "reason": "Reviewed"}
         assert browser.post(f"{PREFIX}/moderation/goals/{goal}", json=decision, headers=owner).status_code == 403
         approve(browser, "goals", goal)
+        rendered = browser.get(f"/goals/{goal}").text
+        assert "&lt;b&gt;Docs&lt;/b&gt;&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
+        assert "<script>alert(1)</script>" not in rendered
         task = browser.post(f"{PREFIX}/goals/{goal}/tasks", json=TASK, headers=worker).json()["id"]
         assert browser.get(f"{PREFIX}/tasks?available=true").json() == []
         assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=worker).status_code == 409
@@ -39,6 +42,18 @@ def test_proposal_approval_note_reports_and_ban(tmp_path):
         }, headers=ADMIN).status_code == 200
         assert browser.get(f"{PREFIX}/me", headers=worker).status_code == 401
         assert browser.get(f"{PREFIX}/tasks/{task}").status_code == 404
+
+
+def test_code_and_markup_are_preserved_as_text(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        member = contributor(browser, "member")
+        body = '#include <stdio.h>\n<img src=x onerror="alert(1)">'
+        thread = browser.post(f"{PREFIX}/threads", headers=member, json={"title": "C examples", "body": body}).json()
+        assert browser.get(f"{PREFIX}/threads/{thread['id']}").json()["body"] == body
+        rendered = browser.get(f"/forum/{thread['id']}").text
+        assert "#include &lt;stdio.h&gt;" in rendered
+        assert "&lt;img src=x onerror=" in rendered
+        assert "<img src=x" not in rendered
 
 
 def test_limits_vote_age_locking_and_pagination(tmp_path):

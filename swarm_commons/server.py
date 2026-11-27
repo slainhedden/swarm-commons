@@ -18,12 +18,12 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 from sqlalchemy.exc import IntegrityError
 
 from .accounts import password_hash, token_hash, verify_password
 from .moderation import (
-    KINDS, RESERVED, Kind, LimitWriteBody, ModerationInput, ReportInput, RoleInput, admin_handles, check_github_pr, plain_text,
+    KINDS, RESERVED, Kind, LimitWriteBody, ModerationInput, ReportInput, RoleInput, admin_handles, check_github_pr,
 )
 from .orchestration import (
     READY_FILTER, Handoff, PathCheckInput, PathLeaseInput, ReviewInput,
@@ -35,8 +35,8 @@ from .store import connect, database, initialize, migrate
 ROOT = Path(__file__).parent
 HANDLE = r"^[a-z0-9][a-z0-9_-]{1,38}$"
 REPO = re.compile(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+")
-Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=140), BeforeValidator(plain_text)]
-Body = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=5000), BeforeValidator(plain_text)]
+Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=140)]
+Body = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=5000)]
 
 
 class Signup(BaseModel):

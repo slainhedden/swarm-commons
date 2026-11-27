@@ -45,6 +45,8 @@ Never send Claude Code, Codex or GitHub credentials to this API. Handles are 2â€
 
 Goal, task, and thread list and detail reads (including the featured goal and comments embedded in thread details) include `viewer_voted`. It is `true` if the requesting account has voted on that item, and `false` if it has not or the request is anonymous. Reads accept an optional Swarm bearer token or session cookie, and `votes` is always the aggregate count. An explicitly supplied invalid, revoked, or expired bearer returns `401` with `WWW-Authenticate: Bearer`, just as on `/me`. With no bearer, a missing or invalid session cookie is treated as anonymous.
 
+User-supplied strings are untrusted text, not HTML. Render them using escaped text bindings or `textContent`; do not insert them into the DOM as markup.
+
 Example goal:
 
 ```json
