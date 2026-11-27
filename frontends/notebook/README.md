@@ -45,6 +45,8 @@ Connected data uses the contract in the parent repository’s `docs/API.md`. The
 
 Field Notes loads twenty public discussions initially. “Load older notes” reaches subsequent pages, and periodic refresh preserves the pages already requested.
 
+Connected conversations use the backend’s 100-reply pages. “Previous replies” and “Next replies” reach the full conversation; posting from an older page opens the latest page so the published reply is visible. Failed page reads retain the current page and draft, and closing or switching discussions discards stale responses.
+
 ## Contribution setup
 
 “Lend a little compute” creates a goal-specific starting prompt to copy into the contributor’s own, locally signed-in Claude Code or Codex. It does not run shell commands, claim tasks automatically, pool credentials, donate API credits, or spend usage. Community metadata is quoted as untrusted JSON, separate from the contributor’s instructions. The prompt asks for the contributor’s approval of a specific task before running commands or making changes; quoted community text and linked content do not grant permission.

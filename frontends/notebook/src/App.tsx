@@ -50,6 +50,7 @@ import {
   type Session,
 } from "./api";
 import { contributionPrompt } from "./safety";
+import { latestReplyPage, type ReplyPage } from "./pagination";
 
 type Tab = "The commons" | "Goal board" | "Field notes";
 type Modal =
@@ -268,9 +269,9 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [requestError, setRequestError] = useState("");
   const [remoteVotes, setRemoteVotes] = useState<string[]>([]);
-  const [remoteComments, setRemoteComments] = useState<
-    { id: number; author: string; body: string }[]
-  >([]);
+  const [replyData, setReplyData] = useState<ReplyPage>({ comments: [] });
+  const [replyLoading, setReplyLoading] = useState(false);
+  const replyRequest = useRef(0);
   const [menu, setMenu] = useState(false);
   const mobileMenuRef = useRef<HTMLButtonElement>(null);
   const dialogReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -377,21 +378,31 @@ export default function App() {
   }, [session?.handle]);
   useEffect(() => {
     if (!thread || !live) return;
-    let cancelled = false;
-    setRemoteComments([]);
-    void request<{ comments: { id: number; author: string; body: string }[] }>(
-      `/threads/${thread.id}`,
-    )
-      .then((result) => {
-        if (!cancelled) setRemoteComments(result.comments);
-      })
-      .catch((cause) => {
-        if (!cancelled) setRequestError(cause.message);
-      });
+    setReplyData({ comments: [] });
+    void loadReplies(thread.id, 1);
     return () => {
-      cancelled = true;
+      replyRequest.current++;
     };
-  }, [thread, live]);
+  }, [thread, live, session?.token]);
+  async function loadReplies(threadId: string, page: number | "latest") {
+    const version = ++replyRequest.current;
+    setReplyLoading(true);
+    setRequestError("");
+    try {
+      const readPage = (number: number) => request<ReplyPage>(
+        `/threads/${threadId}?page=${number}`, { token: session?.token },
+      );
+      const result = await (page === "latest" ? latestReplyPage(readPage) : readPage(page));
+      if (version === replyRequest.current) setReplyData(result);
+    } catch (cause) {
+      if (version === replyRequest.current) {
+        if (cause instanceof ApiError && cause.status === 401) expireSession();
+        setRequestError(cause instanceof Error ? cause.message : "Could not load replies.");
+      }
+    } finally {
+      if (version === replyRequest.current) setReplyLoading(false);
+    }
+  }
   function requireSession() {
     if (session) return true;
     setToast("Sign in to add your voice to the public community.");
@@ -584,8 +595,9 @@ export default function App() {
       if (!requireSession()) return;
       setBusy(true);
       setRequestError("");
+      const version = replyRequest.current;
       try {
-        const result = await request<{
+        await request<{
           id: number;
           author: string;
           body: string;
@@ -594,8 +606,11 @@ export default function App() {
           token: session!.token,
           body: { body: comment.trim() },
         });
-        setRemoteComments((current) => [...current, result]);
-        setComment("");
+        if (version === replyRequest.current) {
+          setComment("");
+          setToast("Your reply was published.");
+          await loadReplies(thread.id, "latest");
+        }
         await refresh();
       } catch (cause) {
         if (cause instanceof ApiError && cause.status === 401) expireSession();
@@ -1872,7 +1887,7 @@ export default function App() {
             </div>
           </div>
           <p className="thread-body">{thread.body}</p>
-          <div className="thread-replies">
+          <div className="thread-replies" aria-busy={live && replyLoading}>
             <h3>
               The conversation <MessageCircle size={17} />
             </h3>
@@ -1881,8 +1896,9 @@ export default function App() {
                 ? "A public conversation. Be kind, be curious, be useful."
                 : "Try adding a reply. Demo replies are private to this browser."}
             </p>
+            {live && replyLoading && <p className="form-help" role="status">Loading replies…</p>}
             {(live
-              ? remoteComments.map((reply) => ({
+              ? replyData.comments.map((reply) => ({
                   name: reply.author,
                   body: reply.body,
                 }))
@@ -1896,6 +1912,21 @@ export default function App() {
                 </div>
               </div>
             ))}
+            {live && ((replyData.comments_page || 1) > 1 || replyData.comments_next_page) && (
+              <nav className="reply-pagination" aria-label="Reply pages">
+                <button className="button" type="button"
+                  disabled={busy || replyLoading || (replyData.comments_page || 1) <= 1}
+                  onClick={() => void loadReplies(thread.id, (replyData.comments_page || 1) - 1)}>
+                  Previous replies
+                </button>
+                <span role="status">Page {replyData.comments_page || 1}</span>
+                <button className="button" type="button"
+                  disabled={busy || replyLoading || !replyData.comments_next_page}
+                  onClick={() => void loadReplies(thread.id, replyData.comments_next_page!)}>
+                  Next replies
+                </button>
+              </nav>
+            )}
           </div>
           <form onSubmit={addComment}>
             <label className="form-label" htmlFor="reply">
@@ -1916,7 +1947,7 @@ export default function App() {
                 {requestError}
               </p>
             )}
-            <button className="button dark" type="submit" disabled={busy}>
+            <button className="button dark" type="submit" disabled={busy || (live && replyLoading)}>
               {busy ? "Leaving your note…" : "Leave a note"} <Send size={15} />
             </button>
           </form>
