@@ -2,7 +2,6 @@ import argparse
 import getpass
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -13,10 +12,10 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-import httpx
 from pydantic import ValidationError
 
 from .client import Client, SwarmError, save_config, server_url
+from .github import GITHUB_REPO, public_repo_slug, valid_repo_slug
 from .guards import claude_guard, commit_guard, install_commit_guard, staged_paths, verify_paths
 from .local import load_policy, safe_env, state_root, usage_reservation
 from .orchestration import Handoff
@@ -211,34 +210,20 @@ def report_run(client, task_id, agent):
 
 
 def require_public_repo(slug):
-    try:
-        url = httpx.URL(f"https://api.github.com/repos/{slug}")
-        for _ in range(4):
-            response = httpx.get(str(url), trust_env=False, timeout=5)
-            if response.status_code == 200:
-                metadata = response.json()
-                if isinstance(metadata, dict) and metadata.get("private") is False:
-                    return
-                break
-            if not response.has_redirect_location:
-                break
-            url = url.join(response.headers["location"])
-            if (url.scheme, url.host, url.port) != ("https", "api.github.com", None) or url.userinfo:
-                break
-    except (httpx.HTTPError, ValueError):
-        pass
-    raise SwarmError("Could not verify the target as a public GitHub repository.")
+    canonical = public_repo_slug(slug)
+    if canonical is None:
+        raise SwarmError("Could not verify the target as a public GitHub repository.")
+    return canonical
 
 
 def run_task(client, args):
     task = client.get(f"tasks/{args.id}")
     repo = task["repo_url"]
-    if not re.fullmatch(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repo):
+    slug = repo.removeprefix(GITHUB_REPO)
+    if slug == repo or not valid_repo_slug(slug):
         raise SwarmError("Task does not target a supported GitHub repository.")
-    slug = repo.removeprefix("https://github.com/")
-    if slug.rsplit("/", 1)[1] in {".", ".."}:
-        raise SwarmError("Task does not target a supported GitHub repository.")
-    require_public_repo(slug)
+    slug = require_public_repo(slug)
+    repo = GITHUB_REPO + slug
     if bool(args.test_image) != bool(args.test_command):
         raise SwarmError("Set both --test-image and --test-command to verify in Docker.")
     launcher = None

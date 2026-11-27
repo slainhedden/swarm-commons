@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 from sqlalchemy.exc import IntegrityError
 
 from .accounts import password_hash, token_hash, verify_password
+from .github import GITHUB_REPO, REPO_SLUG, public_repo_slug, valid_repo_slug
 from .moderation import (
     KINDS, RESERVED, Kind, LimitWriteBody, ModerationInput, ReportInput, RoleInput, admin_handles, check_github_pr,
 )
@@ -38,7 +39,7 @@ MAX_EVENT_STREAMS = 32
 MAX_EVENT_STREAMS_PER_IP = 4
 TASK_ANCESTORS_APPROVED = approved_task_ancestors("t.parent_id")
 HANDLE = r"^[a-z0-9][a-z0-9_-]{1,38}$"
-REPO = re.compile(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+")
+PR = re.compile(rf"https://github\.com/({REPO_SLUG})/pull/[1-9][0-9]*", re.IGNORECASE)
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=140)]
 Body = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=5000)]
 
@@ -139,7 +140,7 @@ class EventResponse(BaseModel):
 
 def repo_url(value):
     normalized = value.rstrip("/").removesuffix(".git")
-    if not REPO.fullmatch(normalized) or normalized.rsplit("/", 1)[1] in {".", ".."}:
+    if not normalized.startswith(GITHUB_REPO) or not valid_repo_slug(normalized.removeprefix(GITHUB_REPO)):
         raise HTTPException(422, "Use a public repository URL such as https://github.com/org/repo.")
     return normalized
 
@@ -588,7 +589,12 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         item = task(task_id)
         if item["status"] != "claimed" or item["claimant"] != handle:
             raise HTTPException(409, "Only the active claimant can submit a result.")
-        if not re.fullmatch(re.escape(item["repo_url"]) + r"/pull/[1-9][0-9]*", data.pr_url, re.IGNORECASE):
+        submitted_repo = PR.fullmatch(data.pr_url)
+        goal_slug = item["repo_url"].removeprefix(GITHUB_REPO)
+        if not submitted_repo:
+            raise HTTPException(422, "Use a GitHub pull request URL on the goal repository.")
+        pr_slug = submitted_repo[1].lower()
+        if pr_slug != goal_slug.lower() and pr_slug != (public_repo_slug(goal_slug) or "").lower():
             raise HTTPException(422, "Use a GitHub pull request URL on the goal repository.")
         check = pr_checker(data.pr_url, item["claimed_at"])
         if check == "invalid":

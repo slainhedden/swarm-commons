@@ -134,8 +134,9 @@ def test_optional_auth_rejects_invalid_bearer_but_accepts_anonymous_reads(tmp_pa
         assert browser.get(f"{PREFIX}/me").status_code == 401
 
 
-def test_voting_progress_and_submission(app):
+def test_voting_progress_and_submission(app, monkeypatch):
     browser, _ = app
+    monkeypatch.setattr(server, "public_repo_slug", lambda slug: slug)
     author = contributor(browser, "river")
     worker = password_account(browser, "casey")
     first, _ = proposal(browser, author)
@@ -208,6 +209,30 @@ def test_viewer_vote_state_for_public_reads_and_vote_responses(app):
         updated = browser.delete(f"{PREFIX}/{target}/vote").raise_for_status().json()
         assert updated["votes"] == 0 and updated["viewer_voted"] is False
     check_reads(False)
+
+
+def test_submission_accepts_canonical_url_for_renamed_public_goal_repo(app, monkeypatch):
+    browser, _ = app
+    owner = contributor(browser, "owner")
+    worker = contributor(browser, "worker")
+    _, task = proposal(browser, owner)
+    assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=worker).status_code == 200
+
+    def lookup(url, **kwargs):
+        if str(url) == "https://api.github.com/repos/example/docs":
+            return httpx.Response(301, headers={"Location": "/repositories/123"})
+        assert str(url) == "https://api.github.com/repositories/123"
+        return httpx.Response(200, json={"private": False, "full_name": "NewOrg/NewProject"})
+
+    monkeypatch.setattr(httpx, "get", lookup)
+    route = f"{PREFIX}/tasks/{task}/submit"
+    assert browser.post(route, headers=worker, json={
+        "pr_url": "https://github.com/other/project/pull/1", "summary": "Unrelated",
+    }).status_code == 422
+    canonical = "https://github.com/NewOrg/NewProject/pull/1"
+    accepted = browser.post(route, headers=worker, json={"pr_url": canonical, "summary": "Renamed"})
+    assert accepted.status_code == 200
+    assert accepted.json()["pr_url"] == canonical
 
 
 def test_claim_race_heartbeat_and_expiration(app):
