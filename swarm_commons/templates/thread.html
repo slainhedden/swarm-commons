@@ -14,8 +14,12 @@
     <div class="actions">{{ vote_button('comments', comment, viewer, my_votes) }}{{ report_link('comments', comment.id, viewer) }}</div>
   </article>
   {% else %}<p>No replies yet.</p>{% endfor %}
+  <div class="actions">
+    {% if thread.comments_page > 1 %}<a href="?page={{ thread.comments_page - 1 }}">← Previous replies</a>{% endif %}
+    {% if thread.comments_next_page %}<a href="?page={{ thread.comments_next_page }}">Next replies →</a>{% endif %}
+  </div>
   {% if thread.locked %}<p>This discussion is locked.</p>{% elif viewer %}
-  <form method="post" class="form" action="/forum/{{ thread.id }}/comments">
+  <form method="post" class="form" action="/forum/{{ thread.id }}/comments?page={{ thread.comments_page }}">
     {% if error %}<p role="alert">{{ error }}</p>{% endif %}
     <label for="body">Reply</label><textarea id="body" name="body" maxlength="5000" required>{{ draft_body|default('') }}</textarea>
     <button>Post reply</button>

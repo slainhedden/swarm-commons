@@ -2,12 +2,12 @@ import argparse
 import getpass
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,6 +15,7 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from .client import Client, SwarmError, save_config, server_url
+from .github import GITHUB_REPO, public_repo_slug, valid_repo_slug
 from .guards import claude_guard, commit_guard, install_commit_guard, staged_paths, verify_paths
 from .local import load_policy, safe_env, state_root, usage_reservation
 from .orchestration import Handoff
@@ -36,6 +37,10 @@ def execute(*args, cwd=None, env=None, capture=False):
 
 def confirm(message):
     return input(f"{message} [y/N] ").strip().lower() in {"y", "yes"}
+
+
+def terminal_text(value):
+    return "".join(ascii(char)[1:-1] if unicodedata.category(char) in {"Cc", "Cf"} else char for char in value)
 
 
 def login(args):
@@ -204,14 +209,21 @@ def report_run(client, task_id, agent):
         report("finished", "Local agent finished; changes await contributor review.")
 
 
+def require_public_repo(slug):
+    canonical = public_repo_slug(slug)
+    if canonical is None:
+        raise SwarmError("Could not verify the target as a public GitHub repository.")
+    return canonical
+
+
 def run_task(client, args):
     task = client.get(f"tasks/{args.id}")
     repo = task["repo_url"]
-    if not re.fullmatch(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repo):
+    slug = repo.removeprefix(GITHUB_REPO)
+    if slug == repo or not valid_repo_slug(slug):
         raise SwarmError("Task does not target a supported GitHub repository.")
-    slug = repo.removeprefix("https://github.com/")
-    if slug.rsplit("/", 1)[1] in {".", ".."}:
-        raise SwarmError("Task does not target a supported GitHub repository.")
+    slug = require_public_repo(slug)
+    repo = GITHUB_REPO + slug
     if bool(args.test_image) != bool(args.test_command):
         raise SwarmError("Set both --test-image and --test-command to verify in Docker.")
     launcher = None
@@ -220,6 +232,8 @@ def run_task(client, args):
         if args.agent != "codex" or not launcher.is_absolute() or not os.access(launcher, os.X_OK) or not launcher.is_file():
             raise SwarmError("--codex-external-launcher requires an absolute executable path and --agent codex.")
     policy = load_policy()
+    if task.get("ready") is False:
+        raise SwarmError("This task has prerequisites that are unfinished or unavailable.")
     upstream = []
     for dependency_id in task.get("depends_on", ()):
         dependency = client.get(f"tasks/{dependency_id}")
@@ -261,7 +275,7 @@ def review_and_submit(client, args, task, repo, slug, workspace, base_branch, ba
         print("No changes to submit.")
         return
     execute("git", "--no-pager", "diff", "--cached", "--no-ext-diff", "--no-textconv", base, cwd=workspace)
-    tests = verify(workspace, args.test_image, args.test_command)
+    tests = verify(workspace, args.test_image, args.test_command, git_dir=workspace.parent / "repo.git")
     print("Verification: " + ", ".join(test["outcome"] for test in tests))
     try:
         handoff = Handoff(
@@ -340,7 +354,8 @@ def main(argv=None):
                     params = {"goal_id": args.goal} if args.goal is not None else {}
                     tasks = client.get("tasks", available=True, **params)
                     for task in tasks:
-                        print(f"#{task['id']}  ↑{task['votes']}  {task['title']}  ({task['goal_title']})")
+                        title, goal = terminal_text(task["title"]), terminal_text(task["goal_title"])
+                        print(f"#{task['id']}  ↑{task['votes']}  {title}  ({goal})")
                     if not tasks:
                         print("No open tasks found.")
                 elif args.command == "claim":

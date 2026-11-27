@@ -15,6 +15,9 @@ test = ["pytest>=8,<10"]
 [project.scripts]
 swarm = "swarm_commons.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["swarm_commons*"]
+
 [tool.setuptools.package-data]
 swarm_commons = ["templates/*.html", "static/*.css", "static/*.js", "migrations/*.py", "migrations/versions/*.py"]
 
