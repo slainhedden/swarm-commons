@@ -134,7 +134,21 @@ def test_fake_run_against_local_bare_repo(tmp_path, monkeypatch, capsys):
         assert client.get(f"tasks/{task['id']}")["status"] == "open"
         declined = iter(("y", "n"))
         monkeypatch.setattr("builtins.input", lambda _: next(declined))
-        assert cli.main(["run", str(task["id"]), "--agent", "fake"]) == 0
+        with monkeypatch.context() as limited:
+            limited.setattr(httpx, "get", lambda *args, **kwargs: httpx.Response(403))
+
+            def git_discovery(method, url, **options):
+                assert method == "GET"
+                assert url == "https://github.com/example/docs.git/info/refs?service=git-upload-pack"
+                assert options["trust_env"] is False and "auth" not in options
+                return nullcontext(httpx.Response(200, headers={
+                    "Content-Type": "application/x-git-upload-pack-advertisement",
+                }))
+
+            limited.setattr(httpx, "stream", git_discovery)
+            assert cli.main(["run", str(task["id"]), "--agent", "claude"]) == 1
+            assert "Try again later" in capsys.readouterr().err
+            assert cli.main(["run", str(task["id"]), "--agent", "fake"]) == 0
         assert client.get(f"tasks/{task['id']}")["status"] == "open"
         assert "Released task" in capsys.readouterr().out
         answers = iter(("y", "y", "Tested a fake agent"))
@@ -154,6 +168,55 @@ def test_fake_run_against_local_bare_repo(tmp_path, monkeypatch, capsys):
         assert len(refs) == 1
         assert "Fake agent result" in git("show", f"{refs[0]}:SWARM-FAKE-RESULT.md", cwd=remote)
         assert "Result reported to Swarm Commons." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("still_limited", [False, True])
+def test_rate_limited_fake_run_resolves_transferred_repo_before_publishing(tmp_path, monkeypatch, capsys, still_limited):
+    canonical = "new-owner/docs"
+    initial_lookup = iter((httpx.Response(403),))
+    later_lookup = httpx.Response(403) if still_limited else httpx.Response(
+        200, json={"private": False, "full_name": canonical},
+    )
+    monkeypatch.setattr(httpx, "get", lambda *args, **kwargs: next(initial_lookup, later_lookup))
+    monkeypatch.setattr(httpx, "stream", lambda *args, **kwargs: nullcontext(httpx.Response(200, headers={
+        "Content-Type": "application/x-git-upload-pack-advertisement",
+    })))
+    monkeypatch.setattr(cli, "make_workspace", lambda url, task_id: (tmp_path, "main", "base", "branch"))
+    monkeypatch.setattr(cli, "usage_reservation", lambda *args: nullcontext())
+    monkeypatch.setattr(cli, "preflight", lambda *args: None)
+    monkeypatch.setattr(cli, "staged_paths", lambda *args: ["SWARM-FAKE-RESULT.md"])
+    monkeypatch.setattr(cli, "verify_paths", lambda *args: None)
+    answers = iter(("y", "y", "Tested a transfer"))
+    monkeypatch.setattr("builtins.input", lambda _: next(answers))
+    commands = []
+    pr = f"https://github.com/{canonical}/pull/42"
+
+    def execute(*args, **kwargs):
+        commands.append(args)
+        if args[:3] == ("gh", "api", "user"):
+            return "example"
+        if args[:3] == ("gh", "pr", "create"):
+            return pr
+        if "push" in args and not any(command[:3] == ("gh", "repo", "fork") for command in commands):
+            raise cli.SwarmError("Write access to transferred repository not granted.")
+        return 0
+
+    monkeypatch.setattr(cli, "execute", execute)
+    with TestClient(test_app(tmp_path / "test.sqlite3", seed=False)) as browser:
+        client, _, task = setup_browser(browser)
+        monkeypatch.setattr(cli.Client, "from_config", lambda: nullcontext(client))
+        result = cli.main(["run", str(task["id"]), "--agent", "fake"])
+        saved = client.get(f"tasks/{task['id']}")
+        if still_limited:
+            assert result == 1
+            assert "Try again later" in capsys.readouterr().err
+            assert not any(command[0] == "gh" or "push" in command for command in commands)
+            assert saved["status"] == "open"
+        else:
+            assert result == 0
+            assert ("gh", "repo", "fork", canonical, "--clone=false", "--remote=false") in commands
+            assert any(command[:5] == ("gh", "pr", "create", "--repo", canonical) for command in commands)
+            assert saved["pr_url"] == pr
 
 
 def test_interrupted_run_reports_failed_status_and_reason(tmp_path):

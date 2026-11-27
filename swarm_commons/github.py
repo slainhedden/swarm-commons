@@ -7,6 +7,10 @@ REPO_SLUG = r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+"
 GITHUB_REPO = "https://github.com/"
 
 
+class GitHubMetadataUnavailable(Exception):
+    pass
+
+
 def valid_repo_slug(slug):
     return isinstance(slug, str) and re.fullmatch(REPO_SLUG, slug) and slug.rsplit("/", 1)[1] not in {".", ".."}
 
@@ -18,6 +22,8 @@ def public_repo_slug(slug):
         url = httpx.URL(f"https://api.github.com/repos/{slug}")
         for _ in range(4):
             response = httpx.get(str(url), trust_env=False, timeout=5)
+            if response.status_code in {403, 429}:
+                raise GitHubMetadataUnavailable
             if response.status_code == 200:
                 metadata = response.json()
                 if isinstance(metadata, dict) and metadata.get("private") is False:
@@ -33,3 +39,15 @@ def public_repo_slug(slug):
     except (httpx.HTTPError, httpx.InvalidURL, ValueError):
         pass
     return None
+
+
+def publicly_cloneable(slug):
+    url = f"{GITHUB_REPO}{slug}.git/info/refs?service=git-upload-pack"
+    try:
+        with httpx.stream("GET", url, trust_env=False, timeout=5) as response:
+            return (
+                response.status_code == 200
+                and response.headers.get("content-type") == "application/x-git-upload-pack-advertisement"
+            )
+    except httpx.HTTPError:
+        return False
