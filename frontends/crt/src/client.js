@@ -62,6 +62,28 @@ export function connectedGoals(payload) {
   }));
 }
 
+export function loadThreadPage(id, page = 1) {
+  return request(`/threads/${id}?page=${page}`);
+}
+
+export async function loadThreadWithReply(id, replyId) {
+  let thread = await loadThreadPage(id);
+  const seen = new Set([1]);
+  // The API returns 100 oldest-first replies per page. Start near the end,
+  // then follow the reply's ID if concurrent posts or moderation moved it.
+  let page = Math.max(1, Math.ceil(thread.comment_count / 100));
+  while (!thread.comments.some((reply) => reply.id === replyId)) {
+    if (seen.has(page)) return thread;
+    seen.add(page);
+    thread = await loadThreadPage(id, page);
+    page = thread.comments[0]?.id > replyId
+      ? page - 1
+      : thread.comments_next_page;
+    if (!page) return thread;
+  }
+  return thread;
+}
+
 export function canApproveProposal(kind, item, moderator, goals, handle) {
   if (moderator) return true;
   return (

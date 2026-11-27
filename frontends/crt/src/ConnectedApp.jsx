@@ -3,6 +3,8 @@ import { API_BASE } from "./api.js";
 import {
   canApproveProposal,
   connectedGoals,
+  loadThreadPage,
+  loadThreadWithReply,
   request,
   safeUrl,
 } from "./client.js";
@@ -279,7 +281,11 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
           setTask((old) => (old?.id === item.id ? updated : old));
         }
         if (kind === "threads" && thread?.id === item.id)
-          setThread({ ...thread, ...updated });
+          setThread((old) => ({
+            ...old,
+            votes: updated.votes,
+            viewer_voted: updated.viewer_voted,
+          }));
         if (kind === "comments")
           setThread((old) => ({
             ...old,
@@ -305,9 +311,9 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
       {item.votes || 0}
     </button>
   );
-  const openThread = (id) =>
+  const openThread = (id, page = 1) =>
     action(async () => {
-      setThread(await request(`/threads/${id}`));
+      setThread(await loadThreadPage(id, page));
       open("thread");
     }, "Discussion loaded.");
   const openTask = (id) =>
@@ -1377,6 +1383,23 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
                     </div>
                   ))}
                 </div>
+                <nav className="reply-pages" aria-label="Reply pages">
+                  <button
+                    className="text-link"
+                    disabled={busy || (thread.comments_page || 1) <= 1}
+                    onClick={() => openThread(thread.id, thread.comments_page - 1)}
+                  >
+                    ← previous replies
+                  </button>
+                  <span className="tiny">PAGE {thread.comments_page || 1}</span>
+                  <button
+                    className="text-link"
+                    disabled={busy || !thread.comments_next_page}
+                    onClick={() => openThread(thread.id, thread.comments_next_page)}
+                  >
+                    next replies →
+                  </button>
+                </nav>
                 {thread.locked ? (
                   <p>Discussion locked by a moderator.</p>
                 ) : (
@@ -1386,14 +1409,18 @@ export default function ConnectedApp({ Network, PixelMark, Demo }) {
                       const body = formData(event);
                       if (requireUser())
                         action(async () => {
-                          await request(`/threads/${thread.id}/comments`, {
+                          const reply = await request(`/threads/${thread.id}/comments`, {
                             method: "POST",
                             body,
                           });
-                          setThread(await request(`/threads/${thread.id}`));
                           setReplyDrafts((old) =>
                             editReplyDraft(old, user.handle, thread.id, ""),
                           );
+                          try {
+                            setThread(await loadThreadWithReply(thread.id, reply.id));
+                          } catch (error) {
+                            throw new Error(`Reply published, but loading its page failed. Reopen the discussion; do not resend. ${error.message}`);
+                          }
                         }, "Reply published on the server.");
                     }}
                   >

@@ -1355,6 +1355,14 @@ select {
   border-block: 1px solid var(--border);
   margin-top: 25px;
 }
+.reply-pages {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin: 18px 0;
+}
 .thread-replies > div {
   padding: 18px 0;
 }
