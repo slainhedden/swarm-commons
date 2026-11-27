@@ -252,6 +252,23 @@ def test_event_stream_limits_concurrent_clients_and_releases_slot(app, monkeypat
             time.sleep(0.02)
 
 
+def test_event_stream_reserves_capacity_for_other_ips(tmp_path, monkeypatch):
+    monkeypatch.setenv("SWARM_TRUST_RAILWAY_CLIENT_IP", "1")
+    monkeypatch.setattr(server, "MAX_EVENT_STREAMS_PER_IP", 1)
+    app = test_app(tmp_path / "db.sqlite3", seed=False)
+    with TestClient(app), live_server(app) as url, httpx.Client(timeout=5) as client:
+        path = f"{url}{PREFIX}/events/stream"
+        first_ip = {"X-Real-IP": "192.0.2.1"}
+        second_ip = {"X-Real-IP": "192.0.2.2"}
+        with client.stream("GET", path, headers=first_ip) as first:
+            assert first.status_code == 200
+            with client.stream("GET", path, headers=first_ip) as duplicate:
+                assert duplicate.status_code == 429
+                assert duplicate.headers["Retry-After"] == "2"
+            with client.stream("GET", path, headers=second_ip) as second:
+                assert second.status_code == 200
+
+
 def test_thread_replies_paginate_and_post_redirects_to_reply(app):
     browser, now = app
     author = password_account(browser, "river")

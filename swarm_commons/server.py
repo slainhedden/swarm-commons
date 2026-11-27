@@ -35,6 +35,7 @@ from .store import connect, database, initialize, migrate
 ROOT = Path(__file__).parent
 REPLIES_PER_PAGE = 100
 MAX_EVENT_STREAMS = 32
+MAX_EVENT_STREAMS_PER_IP = 4
 HANDLE = r"^[a-z0-9][a-z0-9_-]{1,38}$"
 REPO = re.compile(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+")
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=140)]
@@ -1152,14 +1153,22 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return activity(max(1, min(limit, 100)))
 
     active_streams = 0
+    streams_by_ip = {}
 
     class EventStream(StreamingResponse):
+        def __init__(self, content, ip, **kwargs):
+            super().__init__(content, **kwargs)
+            self.ip = ip
+
         async def __call__(self, scope, receive, send):
             nonlocal active_streams
             try:
                 await super().__call__(scope, receive, send)
             finally:
                 active_streams -= 1
+                streams_by_ip[self.ip] -= 1
+                if streams_by_ip[self.ip] == 0:
+                    del streams_by_ip[self.ip]
 
     @api.get("/events/stream", response_class=StreamingResponse)
     async def api_stream(request: Request, goal_id: int | None = None, after: int = 0):
@@ -1180,11 +1189,15 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                     await asyncio.sleep(2)
 
         nonlocal active_streams
+        ip = rate_limit_ip(request)
+        if streams_by_ip.get(ip, 0) >= MAX_EVENT_STREAMS_PER_IP:
+            raise HTTPException(429, "Too many active event streams from this client.", headers={"Retry-After": "2"})
         if active_streams >= MAX_EVENT_STREAMS:
             raise HTTPException(503, "Too many active event streams.", headers={"Retry-After": "2"})
-        response = EventStream(stream(), media_type="text/event-stream",
+        response = EventStream(stream(), ip, media_type="text/event-stream",
                                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
         active_streams += 1
+        streams_by_ip[ip] = streams_by_ip.get(ip, 0) + 1
         return response
 
     @api.get("/threads", response_model=list[VotableResponse])
