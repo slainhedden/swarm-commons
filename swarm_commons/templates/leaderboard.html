@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="narrow">
+  <p class="eyebrow">OPEN-SOURCE CONTRIBUTIONS</p>
+  <h1>Leaderboard</h1>
+  <p>Ranked by results submitted to public repositories.</p>
+  {% if leaders %}
+  <table><thead><tr><th>Contributor</th><th>Results</th><th>Done</th></tr></thead><tbody>
+  {% for leader in leaders %}<tr><td>@{{ leader.handle }}</td><td>{{ leader.contributions }}</td><td>{{ leader.done }}</td></tr>{% endfor %}
+  </tbody></table>
+  {% else %}<p>No results submitted yet. <a href="/">Find a task</a> to make the first contribution.</p>{% endif %}
+</section>
+{% endblock %}

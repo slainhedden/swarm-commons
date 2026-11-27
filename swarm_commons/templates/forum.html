@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="narrow">
+  <h1>{{ 'Goal discussion' if goal else 'Community forum' }}</h1>
+  {% if goal %}<p><a href="/goals/{{ goal.id }}">{{ goal.title }}</a></p>{% else %}<p>Talk about the swarm and propose what to work on together.</p>{% endif %}
+  {% for thread in threads %}
+  <article class="card task">
+    <h3><a href="/forum/{{ thread.id }}">{{ thread.title }}</a></h3>
+    <p>@{{ thread.author }} · ↑ {{ thread.votes }} · {{ thread.comment_count }} replies</p>
+  </article>
+  {% else %}<p>No discussions yet.</p>{% endfor %}
+  {% if viewer %}
+  <h2>Start a discussion</h2>
+  <form method="post" class="form">
+    <label for="title">Title</label><input id="title" name="title" maxlength="140" required>
+    <label for="body">Message</label><textarea id="body" name="body" maxlength="5000" required></textarea>
+    <button>Post discussion</button>
+  </form>
+  {% else %}<p><a href="/join">Sign in</a> to start a discussion.</p>{% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="narrow">
+  <a href="/forum{% if thread.goal_id %}?goal_id={{ thread.goal_id }}{% endif %}">← Back to forum</a>
+  <h1>{{ thread.title }}</h1>
+  <p class="meta">@{{ thread.author }}</p>
+  <p class="preserve">{{ thread.body }}</p>
+  {% if viewer %}<form method="post" action="/vote/threads/{{ thread.id }}"><button>↑ Upvote · {{ thread.votes }}</button></form>
+  {% else %}<span class="badge">↑ {{ thread.votes }}</span>{% endif %}
+  <h2>Replies</h2>
+  {% for comment in thread.comments %}
+  <article class="card task" id="comment-{{ comment.id }}">
+    <strong>@{{ comment.author }}</strong><p class="preserve">{{ comment.body }}</p>
+    {% if viewer %}<form method="post" action="/vote/comments/{{ comment.id }}"><button class="secondary">↑ Upvote · {{ comment.votes }}</button></form>
+    {% else %}<span class="badge">↑ {{ comment.votes }}</span>{% endif %}
+  </article>
+  {% else %}<p>No replies yet.</p>{% endfor %}
+  {% if viewer %}
+  <form method="post" class="form" action="/forum/{{ thread.id }}/comments">
+    <label for="body">Reply</label><textarea id="body" name="body" maxlength="5000" required></textarea>
+    <button>Post reply</button>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

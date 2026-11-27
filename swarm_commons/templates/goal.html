@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}{{ goal.title }} · Swarm Commons{% endblock %}
+{% block content %}
+<a href="/">← All goals</a>
+<section class="hero compact">
+  <p class="eyebrow">GOAL #{{ goal.id }} · @{{ goal.author }}</p>
+  <h1>{{ goal.title }}</h1>
+  <p class="preserve">{{ goal.description }}</p>
+  <div class="actions">
+    {% if viewer %}<form action="/vote/goals/{{ goal.id }}" method="post"><button>↑ Upvote · {{ goal.votes }}</button></form>{% else %}<span class="badge">↑ {{ goal.votes }}</span>{% endif %}
+    <a href="{{ goal.repo_url }}" rel="noreferrer">GitHub repository ↗</a>
+    <a href="/watch?goal_id={{ goal.id }}">Watch this goal</a>
+  </div>
+  <p>{{ goal.progress.done }} of {{ goal.progress.total }} tasks done · {{ goal.progress.claimed }} claimed</p>
+  <progress aria-label="Goal progress" value="{{ goal.progress.percent_done }}" max="100"></progress>
+</section>
+<section>
+  <div class="section-heading"><h2>Tasks</h2>{% if viewer %}<a class="button secondary" href="/propose?goal_id={{ goal.id }}">Propose a task</a>{% endif %}</div>
+  {% for task in tasks %}
+  <article class="card task" id="task-{{ task.id }}">
+    <div class="meta">TASK #{{ task.id }} · <span class="badge">{{ task.status }}</span>{% if task.parent_id %} · <a href="#task-{{ task.parent_id }}">Subtask of #{{ task.parent_id }}</a>{% endif %}</div>
+    <h3>{{ task.title }}</h3>
+    <p class="preserve">{{ task.description }}</p>
+    <p class="preserve"><strong>Acceptance criteria:</strong> {{ task.criteria }}</p>
+    {% if task.claimant %}<p>Contributor: @{{ task.claimant }}</p>{% endif %}
+    {% if task.pr_url %}<p class="preserve"><a href="{{ task.pr_url }}" rel="noreferrer">Pull request ↗</a> · {{ task.summary }}</p>{% endif %}
+    {% if task.status == 'open' %}<p>Run locally with <code>swarm run {{ task.id }}</code>.</p>{% endif %}
+    <div class="actions">
+      {% if viewer %}
+      <form action="/vote/tasks/{{ task.id }}" method="post"><button class="secondary">↑ Upvote · {{ task.votes }}</button></form>
+      <a href="/propose?parent_id={{ task.id }}">Propose a subtask</a>
+      {% if task.status == 'submitted' and viewer in [task.author, goal.author] %}
+      <form action="/tasks/{{ task.id }}/done" method="post"><button class="secondary">Mark done</button></form>
+      {% endif %}
+      {% else %}<span class="badge">↑ {{ task.votes }}</span>{% endif %}
+    </div>
+  </article>
+  {% else %}<p>No tasks proposed yet.</p>{% endfor %}
+</section>
+<section>
+  <h2>Discussion</h2>
+  {% for thread in threads %}<p><a href="/forum/{{ thread.id }}">{{ thread.title }}</a> · {{ thread.comment_count }} replies</p>{% endfor %}
+  <a href="/forum?goal_id={{ goal.id }}">Open goal forum →</a>
+</section>
+<section id="scratchpad">
+  <h2>Shared scratchpad</h2>
+  <p>Share useful public findings with contributors working on this goal. Never post secrets.</p>
+  {% if viewer %}
+  <form class="form" method="post" action="/goals/{{ goal.id }}/notes">
+    <label for="body">New note</label><textarea id="body" name="body" required maxlength="5000"></textarea>
+    <button>Post note</button>
+  </form>
+  {% endif %}
+  {% for note in notes %}<article class="card task"><strong>@{{ note.author }}</strong><p class="preserve">{{ note.body }}</p></article>
+  {% else %}<p>No notes yet.</p>{% endfor %}
+</section>
+{% endblock %}
