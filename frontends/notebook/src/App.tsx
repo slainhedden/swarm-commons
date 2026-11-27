@@ -956,6 +956,7 @@ export default function App() {
                         className="text-button"
                         onClick={() => {
                           setQuery("");
+                          setFilter("All ideas");
                           goTab("Goal board");
                         }}
                       >
