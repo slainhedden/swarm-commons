@@ -217,3 +217,23 @@ test("loads older discussion pages and disables older navigation on a partial la
   assert.equal(older.hasOlderThreads, false);
   assert.ok(paths.includes("/threads?page=2&limit=20"));
 });
+
+test("does not offer an empty page after an exactly full final discussion page", async () => {
+  const discussions = Array.from({ length: 40 }, (_, i) => ({ id: 40 - i }));
+  globalThis.fetch = async (url) => {
+    const target = new URL(url);
+    const page = Number(target.searchParams.get("page"));
+    return Response.json(
+      target.pathname.endsWith("/threads")
+        ? discussions.slice((page - 1) * 20, page * 20)
+        : target.pathname.endsWith("/stats")
+          ? { agents_running: 0, contributors: 0, prs_merged: 0 }
+          : target.pathname.endsWith("/featured") ? null : [],
+    );
+  };
+  assert.equal((await adapter.snapshot()).hasOlderThreads, true);
+  const lastPage = await adapter.snapshot(2);
+  assert.equal(lastPage.threads.length, 20);
+  assert.equal(lastPage.threads.at(-1).id, 1);
+  assert.equal(lastPage.hasOlderThreads, false);
+});

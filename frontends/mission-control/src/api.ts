@@ -151,9 +151,18 @@ export async function snapshot(threadPage = 1): Promise<Snapshot> {
     typeof stats.agents_running !== "number"
   )
     throw new Error("Unexpected platform response.");
-  const missionStats = featured
-    ? await request<{ agents_running: number }>(`/stats?goal_id=${featured.id}`)
-    : null;
+  const [missionStats, olderThreads] = await Promise.all([
+    featured
+      ? request<{ agents_running: number }>(`/stats?goal_id=${featured.id}`)
+      : null,
+    // A full page is not proof that another page exists. The API has no total
+    // count, so look ahead before offering navigation to an empty page.
+    threads.length === THREAD_PAGE_SIZE
+      ? request<ApiThread[]>(`/threads?page=${threadPage + 1}&limit=${THREAD_PAGE_SIZE}`)
+      : [],
+  ]);
+  if (!Array.isArray(olderThreads))
+    throw new Error("Unexpected platform response.");
   return {
     goals,
     featured,
@@ -163,6 +172,6 @@ export async function snapshot(threadPage = 1): Promise<Snapshot> {
     stats,
     missionStats,
     threadPage,
-    hasOlderThreads: threads.length === THREAD_PAGE_SIZE,
+    hasOlderThreads: olderThreads.length > 0,
   };
 }
