@@ -1,0 +1,230 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import { ArrowUpRight, ArrowRight, ArrowUp, Check, ChevronDown, Copy, ExternalLink, GitBranch, GitPullRequest, Globe2, Hexagon, MessageCircle, Radio, Search, Terminal, Users, X } from 'lucide-react';
+import './style.css';
+import { ApiError, apiBase, request, requestThreadPage, loadSession, saveSession, githubUrl, type ApiGoal, type ApiThread, type ApiSession } from './api';
+
+type Goal = { id: string; title: string; category: string; description: string; votes: number; tasks?: number; viewerVoted?:boolean };
+type Post = { id: string; name: string; initials: string; time: string; title: string; body: string; replies: number; category: string };
+type Agent = { name: string; owner: string; task: string; status: string; color: string; time: string };
+type Modal = 'login' | 'join' | 'watch' | 'propose' | 'about' | 'article' | null;
+const REPO = 'https://github.com/slainhedden/swarm-commons';
+const initialGoals: Goal[] = [
+  {id:'research',title:'A free, open research library',category:'KNOWLEDGE',description:'Make public research searchable, understandable, and accessible to everyone.',votes:2841,tasks:56},
+  {id:'food',title:'No good food left behind.',category:'LOCAL GOOD',description:'Connect surplus food with the community fridges and neighbors who need it.',votes:1836,tasks:24},
+  {id:'access',title:'An accessible web, by default.',category:'ACCESSIBILITY',description:'A free toolkit that finds and fixes the barriers hiding in everyday websites.',votes:1452,tasks:31},
+  {id:'climate',title:'Climate data, made human.',category:'OPEN DATA',description:'Turn complicated climate datasets into clear, useful local information.',votes:987,tasks:18},
+];
+const initialPosts: Post[] = [
+  {id:'1',name:'Maya Chen',initials:'MC',time:'24 min ago',title:'What does “done” look like for the research library?',body:'I drafted acceptance criteria for the first release. Search, readable abstracts, and source citations feel like the right starting line. What are we missing?',replies:18,category:'Discussion'},
+  {id:'2',name:'Owen Brooks',initials:'OB',time:'1 hr ago',title:'My first contribution: one agent, one small fix.',body:'Pointed my local Codex at the metadata parser. Twenty minutes later, my first open-source pull request. Small pieces really do add up.',replies:9,category:'Field notes'},
+  {id:'3',name:'Leila Hassan',initials:'LH',time:'2 hrs ago',title:'The citation index just passed 10,000 papers.',body:'A little milestone worth celebrating. Every record links back to the original source. Next up: deduplication and language detection.',replies:26,category:'Milestones'},
+];
+const agents: Agent[] = [
+  {name:'cedar-07',owner:'maya',task:'Improve semantic search relevance',status:'Building',color:'green',time:'12 min'},
+  {name:'finch-23',owner:'owen',task:'Normalize author metadata',status:'Reviewing',color:'ochre',time:'8 min'},
+  {name:'atlas-12',owner:'leila',task:'Add source citation previews',status:'Building',color:'green',time:'21 min'},
+  {name:'moss-41',owner:'nico',task:'Test keyboard navigation',status:'Testing',color:'blue',time:'4 min'},
+];
+function readLocal<T,>(key:string,fallback:T):T {try {return JSON.parse(localStorage.getItem(key) || 'null') ?? fallback;} catch {return fallback;}}
+function useLocal<T,>(key:string,initial:T) {const [value,setValue]=useState<T>(()=>readLocal(key,initial));useEffect(()=>{try{localStorage.setItem(key,JSON.stringify(value));}catch{}},[key,value]);return [value,setValue] as const;}
+function Mark({small=false}:{small?:boolean}) {return <span className={'brand-mark '+(small?'small':'')} aria-hidden="true"><Hexagon/><span>✳</span></span>;}
+function App(){
+ const [demoProfile,setDemoProfile]=useLocal<{name:string}|null>('common-good-profile',null);
+ const [session,setSession]=useState<ApiSession|null>(loadSession);
+ const [password,setPassword]=useState('');
+ const [authMode,setAuthMode]=useState<'login'|'register'>('login');
+ const [formError,setFormError]=useState('');
+ const [authNotice,setAuthNotice]=useState('');
+ const [busy,setBusy]=useState(false);
+ const [votes,setVotes]=useLocal<string[]>('common-good-votes',[]);
+ const [accountVotes,setAccountVotes]=useLocal<Record<string,string[]>>('common-good-account-votes',{});
+ const [pendingVotes,setPendingVotes]=useState<string[]>([]);
+ const [extraGoals,setExtraGoals]=useLocal<Goal[]>('common-good-goals',[]);
+ const [posts,setPosts]=useLocal<Post[]>('common-good-posts',initialPosts);
+ const [modal,setModal]=useState<Modal>(null);
+ const [activeNav,setActiveNav]=useState('Front page');
+ const [communityTab,setCommunityTab]=useState('All dispatches');
+ const [agentFilter,setAgentFilter]=useState('All agents');
+ const [selectedAgent,setSelectedAgent]=useState(agents[0]);
+ const [toast,setToast]=useState('');
+ const [copied,setCopied]=useState('');
+ const [article,setArticle]=useState<Post|null>(null);
+ const [query,setQuery]=useState('');
+ const [name,setName]=useState('');
+ const [newTitle,setNewTitle]=useState('');
+ const [newDescription,setNewDescription]=useState('');
+ const [newRepo,setNewRepo]=useState(REPO);
+ const [newCategory,setNewCategory]=useState('OPEN SOURCE');
+ const [comment,setComment]=useState('');
+ const [replies,setReplies]=useLocal<Record<string,{name:string;text:string}[]>>('common-good-replies',{});
+ const [liveReplies,setLiveReplies]=useState<Record<string,{name:string;text:string}[]>>({});
+ const [replyPage,setReplyPage]=useState(1);
+ const [replyNextPage,setReplyNextPage]=useState<number|null>(null);
+ const [replyRevision,setReplyRevision]=useState(0);
+ const [repliesLoading,setRepliesLoading]=useState(false);
+ const [replyError,setReplyError]=useState('');
+ const [apiState,setApiState]=useState<'demo'|'unavailable'|'connected'>('demo');
+ const [remoteGoals,setRemoteGoals]=useState<Goal[]|null>(null);
+ const [remotePosts,setRemotePosts]=useState<Post[]>([]);
+ const [discussionGoal,setDiscussionGoal]=useState<Goal|null>(null);
+ const [threadPage,setThreadPage]=useState(1);
+ const [hasMoreThreads,setHasMoreThreads]=useState(false);
+ const [threadsLoading,setThreadsLoading]=useState(false);
+ const [threadsError,setThreadsError]=useState('');
+ const [threadRevision,setThreadRevision]=useState(0);
+ const [liveGoal,setLiveGoal]=useState<{id:string;title:string;description:string;votes:number;repo:string;progress:number}|null>(null);
+ const [liveStats,setLiveStats]=useState({agents_running:0,prs_merged:0,contributors:0});
+ const dialogRef=useRef<HTMLDialogElement>(null);
+ const toastTimer=useRef<ReturnType<typeof setTimeout>>();
+ const live=apiState==='connected';
+ const profile=live?(session?{name:session.handle}:null):demoProfile;
+ const currentRepo=live&&liveGoal?githubUrl(liveGoal.repo):REPO;
+ const currentReplies=live?liveReplies:replies;
+ const voteKey=apiBase+'|'+(session?.handle??'');
+ function hasVoted(id:string){return live?(session?(remoteGoals?.find(g=>g.id===id)?.viewerVoted??(accountVotes[voteKey]??[]).includes(id)):false):votes.includes(id);}
+ async function refresh(signal?:AbortSignal){
+  const [goals,featured]=await Promise.all([request<ApiGoal[]>('/goals',{signal,token:session?.token}),request<ApiGoal|null>('/goals/featured',{signal,token:session?.token})]);
+  const stats=await request<typeof liveStats>('/stats'+(featured?'?goal_id='+featured.id:''),{signal});
+  setRemoteGoals(goals.map(g=>({id:String(g.id),title:g.title,category:'COMMUNITY MISSION',description:g.description,votes:g.votes,tasks:g.task_count,viewerVoted:session?g.viewer_voted:undefined})));
+  setLiveGoal(featured?{id:String(featured.id),title:featured.title,description:featured.description,votes:featured.votes,repo:featured.repo_url,progress:featured.progress.percent_done}:null);
+  setLiveStats({...stats,agents_running:featured?stats.agents_running:0});setApiState('connected');
+ }
+ useEffect(()=>{
+  if(!live)return;
+  const controller=new AbortController();
+  const pageSize=20;
+  const update=async(foreground=false)=>{
+   if(foreground)setThreadsLoading(true);
+   setThreadsError('');
+   try{
+    const goalFilter=discussionGoal?'&goal_id='+encodeURIComponent(discussionGoal.id):'';
+    // The API has no total/has_more; probe the next same-sized page.
+    const [threads,nextThreads]=await Promise.all([
+     request<ApiThread[]>('/threads?page='+threadPage+'&limit='+pageSize+goalFilter,{signal:controller.signal,token:session?.token}),
+     request<ApiThread[]>('/threads?page='+(threadPage+1)+'&limit='+pageSize+goalFilter,{signal:controller.signal,token:session?.token})
+    ]);
+    if(controller.signal.aborted)return;
+    setRemotePosts(threads.map(t=>({id:String(t.id),name:t.author,initials:t.author.slice(0,2).toUpperCase(),time:new Date(t.created_at*1000).toLocaleDateString(),title:t.title,body:t.body,replies:t.comment_count,category:'Discussion'})));
+    setHasMoreThreads(nextThreads.length>0);
+   }catch(error){
+    if(!controller.signal.aborted&&!recoverSession(error))setThreadsError((error as Error).message);
+   }finally{if(foreground&&!controller.signal.aborted)setThreadsLoading(false);}
+  };
+  update(true);const interval=setInterval(update,30000);
+  return()=>{controller.abort();clearInterval(interval);};
+ },[live,session?.token,threadPage,threadRevision,discussionGoal?.id]);
+ useEffect(()=>{
+  if(!live||modal!=='article'||!article||article.id.startsWith('goal-'))return;
+  const controller=new AbortController();
+  setRepliesLoading(true);setReplyError('');
+  requestThreadPage(article.id,replyPage,{signal:controller.signal,token:session?.token}).then(thread=>{
+   if(controller.signal.aborted)return;
+   setLiveReplies(previous=>({...previous,[article.id]:thread.comments.map(c=>({name:c.author,text:c.body}))}));
+   setReplyNextPage(thread.comments_next_page);
+   setArticle(previous=>previous?.id===article.id?{...previous,replies:thread.comment_count}:previous);
+  }).catch(error=>{
+   if(!controller.signal.aborted&&!recoverSession(error))setReplyError((error as Error).message);
+  }).finally(()=>{if(!controller.signal.aborted)setRepliesLoading(false);});
+  return()=>controller.abort();
+ },[live,modal,article?.id,replyPage,replyRevision,session?.token]);
+ function discussGoal(goal:Goal){
+  if(live){setDiscussionGoal(goal);setThreadPage(1);setThreadRevision(value=>value+1);setThreadsLoading(true);setCommunityTab('All dispatches');navigate('Community','community');return;}
+  openPost({id:'goal-'+goal.id,name:'Community desk',initials:'CG',time:'Open for discussion',title:goal.title,body:goal.description+' What would make this genuinely useful? Add your ideas to help shape the brief.',replies:0,category:'Mission discussion'});
+ }
+ useEffect(()=>{if(!apiBase)return;const controller=new AbortController();const update=()=>refresh(controller.signal).catch(e=>{if(e.name!=='AbortError'&&!recoverSession(e))setApiState('unavailable');});update();const interval=setInterval(update,30000);return()=>{controller.abort();clearInterval(interval);};},[session?.token]);
+ useEffect(()=>{setFormError('');if(modal!=='login')setAuthNotice('');},[modal,authMode]);
+ useEffect(()=>{if(modal){dialogRef.current?.showModal();document.body.style.overflow='hidden';}else{dialogRef.current?.close();document.body.style.overflow='';}return()=>{document.body.style.overflow='';};},[modal]);
+ useEffect(()=>()=>clearTimeout(toastTimer.current),[]);
+ function notify(message:string){setToast(message);clearTimeout(toastTimer.current);toastTimer.current=setTimeout(()=>setToast(''),4000);}
+ function recoverSession(error:unknown){if(!(error instanceof ApiError)||error.status!==401)return false;setSession(null);saveSession(null);setPassword('');setFormError('');setAuthNotice(error.message);setAuthMode('login');setApiState('connected');setModal('login');return true;}
+ function navigate(label:string,id:string){setActiveNav(label);document.getElementById(id)?.scrollIntoView({behavior:'smooth',block:'start'});}
+ async function vote(id:string){if(live){if(!session){setModal('login');return;}if(pendingVotes.includes(id))return;const remove=hasVoted(id);setPendingVotes(previous=>[...previous,id]);try{const updated=await request<ApiGoal>('/goals/'+id+'/vote',{method:remove?'DELETE':'POST',token:session.token});setRemoteGoals(previous=>previous?.map(g=>g.id===id?{...g,votes:updated.votes,viewerVoted:updated.viewer_voted??!remove}:g)??null);setLiveGoal(previous=>previous?.id===id?{...previous,votes:updated.votes}:previous);setAccountVotes(previous=>({...previous,[voteKey]:remove?(previous[voteKey]??[]).filter(v=>v!==id):[...new Set([...(previous[voteKey]??[]),id])]}));notify(remove?'Your vote has been removed.':'Your vote is on the public ballot.');await refresh().catch(()=>notify('Vote saved. The ballot will refresh shortly.'));}catch(e){if(!recoverSession(e))notify((e as Error).message);}finally{setPendingVotes(previous=>previous.filter(v=>v!==id));}return;}setVotes(previous=>previous.includes(id)?previous.filter(v=>v!==id):[...previous,id]);}
+ async function copy(text:string,id:string){try{await navigator.clipboard.writeText(text);setCopied(id);setTimeout(()=>setCopied(''),2500);}catch{notify('Clipboard unavailable. Select and copy the command below.');}}
+ function openPost(post:Post){setArticle(post);setComment('');setReplyPage(1);setReplyNextPage(null);setReplyError('');setRepliesLoading(live&&!post.id.startsWith('goal-'));setModal('article');}
+ async function submitAuth(e:React.FormEvent){e.preventDefault();if(!name.trim())return;setAuthNotice('');if(!live){setDemoProfile({name:name.trim()});setModal(null);notify('Welcome to the commons, '+name.trim().split(' ')[0]+'.');return;}setBusy(true);setFormError('');try{const next=await request<ApiSession>('/auth/'+authMode,{method:'POST',body:{username:name.trim(),password}});setSession(next);saveSession(next);setPassword('');setModal(null);notify('Welcome to the commons, '+next.handle+'.');}catch(e){setFormError((e as Error).message);}finally{setBusy(false);}}
+ async function signOut(){let warning='';if(live&&session){try{await request('/auth/logout',{method:'POST',token:session.token});}catch(e){if(!(e instanceof ApiError&&e.status===401))warning='Signed out in this browser. The server session could not be revoked.';}setSession(null);saveSession(null);}else setDemoProfile(null);setPassword('');setModal(null);notify(warning||'You’ve left the newsroom. See you soon.');}
+ function propose(dispatch=false){if(live&&!session){setModal('login');return;}setNewTitle('');setNewDescription('');setNewRepo(REPO);setNewCategory(dispatch?'dispatch':'OPEN SOURCE');setModal('propose');}
+ async function publish(e:React.FormEvent){e.preventDefault();if(!newTitle.trim()||!newDescription.trim())return;const dispatch=newCategory==='dispatch';setBusy(true);setFormError('');try{let pending=false;if(live){const result=await request<ApiGoal|ApiThread>(dispatch?'/threads':'/goals',{method:'POST',token:session?.token,body:dispatch?{title:newTitle.trim(),body:newDescription.trim(),...(discussionGoal?{goal_id:Number(discussionGoal.id)}:{})}:{title:newTitle.trim(),description:newDescription.trim(),repo_url:newRepo.trim()}});pending=!dispatch&&('visibility' in result?result.visibility!=='approved':true);if(dispatch){setThreadPage(1);setThreadRevision(value=>value+1);}await refresh().catch(()=>{});}else if(dispatch){setPosts([{id:crypto.randomUUID(),name:profile?.name??'A neighbor',initials:(profile?.name??'AN').split(' ').map(n=>n[0]).join('').slice(0,2),time:'Just now',title:newTitle.trim(),body:newDescription.trim(),replies:0,category:'Discussion'},...posts]);}else setExtraGoals([...extraGoals,{id:crypto.randomUUID(),title:newTitle.trim(),description:newDescription.trim(),category:newCategory,votes:0}]);setModal(null);notify(pending?'Mission submitted for moderator approval. It is not on the public ballot yet.':(dispatch?'Your dispatch is on the ':'Your mission is on the ')+(live?'public board.':'local board.'));}catch(e){if(!recoverSession(e))setFormError((e as Error).message);}finally{setBusy(false);}}
+ async function publishReply(e:React.FormEvent){
+  e.preventDefault();if(!article||!profile||!comment.trim())return;
+  setBusy(true);setFormError('');let published=false;
+  try{
+   if(live){
+    await request('/threads/'+article.id+'/comments',{method:'POST',token:session?.token,body:{body:comment.trim()}});
+    published=true;setComment('');
+    const updated=await requestThreadPage(article.id,1,{token:session?.token});
+    setReplyPage(Math.max(1,Math.ceil(updated.comment_count/100)));
+    setReplyRevision(value=>value+1);setThreadRevision(value=>value+1);
+   }else{
+    setReplies(previous=>({...previous,[article.id]:[...(previous[article.id]??[]),{name:profile.name,text:comment.trim()}]}));
+    setComment('');
+   }
+  }catch(error){if(!recoverSession(error))setFormError(published?'Your reply was published, but the discussion could not refresh. Reopen it and use the reply pages to see it.':(error as Error).message);}
+  finally{setBusy(false);}
+ }
+
+ const goalList=[...(live?remoteGoals??[]:initialGoals),...(live?[]:extraGoals)].filter(g=>(g.title+' '+g.category).toLowerCase().includes(query.toLowerCase()));
+ const visiblePosts=(live?remotePosts:posts).filter(p=>communityTab==='All dispatches'||p.category===communityTab);
+ const running=live?liveStats.agents_running:128;
+ const progress=live?(liveGoal?.progress??0):68;
+ const merged=live?liveStats.prs_merged:38;
+ return <>
+  <div className="paper" id="front-page">
+   <div className="utility"><span>INDEPENDENT MINDS. COLLECTIVE PROGRESS.</span><button className="edition-button" onClick={()=>setModal('about')}><span className="tiny-dot"/>{apiState==='connected'?'CONNECTED EDITION':apiState==='unavailable'?'DEMO · API OFFLINE':'INTERACTIVE DEMO EDITION'}<ArrowUpRight size={12}/></button></div>
+   <header>
+    <div className="masthead"><div className="masthead-note">A journal of<br/><em>collective intelligence.</em></div><a href="#front-page" className="wordmark" onClick={()=>setActiveNav('Front page')}>The Common Good<span className="wordmark-period">.</span></a><div className="masthead-seal"><Mark/><span>BUILT IN THE OPEN.<br/>FOR EVERYONE.</span></div></div>
+    <div className="edition-line"><span>VOL. 001 &nbsp;—&nbsp; NO. 027</span><span>THE SWARM COMMONS COMMUNITY</span><span>SMALL EFFORTS. EXTRAORDINARY THINGS.</span></div>
+    <nav aria-label="Main navigation"><div className="nav-links">{[['Front page','front-page'],['The mission','mission'],['The swarm','swarm'],['Community','community'],['Field guide','field-guide']].map(([label,id])=><button key={label} className={activeNav===label?'active':''} onClick={()=>navigate(label,id)}>{label}</button>)}</div><div className="account-links"><button className="login-link" onClick={()=>setModal('login')}>{profile?profile.name.split(' ')[0]+'’s desk':'Log in'}</button><button className="button small-button" onClick={()=>setModal('join')}>Join the effort <ArrowUpRight size={15}/></button></div></nav>
+   </header>
+   <div className="wire"><span className="wire-label">ON THE WIRE</span><span><i className="status-dot"/> {running} agents at work</span><span><GitPullRequest size={13}/> {merged} {live?'self-reported completions (all goals)':'contributions merged'}</span><span className="wire-last">Good things happen when we build together.</span><span className="wire-date">COMMUNITY-POWERED, ALWAYS.</span></div>
+   <main>
+    <section className="front-grid" id="mission">
+     <article className="lead-story">
+      <div className="eyebrow red"><span className="red-square"/> THE FRONT-PAGE MISSION <span className="issue-tag">№ {live?String(liveGoal?.id??'—').padStart(3,'0'):'004'}</span></div>
+      <h1>{live?(liveGoal?.title??'The next common good starts here.'):<>Knowledge belongs<br/>to <em>everyone.</em></>}</h1>
+      <p className="lead-deck">{live?(liveGoal?.description??'Propose the first mission and invite the community to build it with you.'):<>We’re building a free, open research library.<br className="desktop-break"/> One shared goal. Hundreds of independent agents.<br className="desktop-break"/> Something useful for all of us.</>}</p>
+      <div className="byline"><span className="byline-mark">✳</span> BY THE COMMUNITY <span className="byline-sep">/</span> <span>OPEN SOURCE, OPEN AMBITION</span></div>
+      <figure className="hero-figure"><img src="/commons-engraving.svg" alt="An engraved globe growing from an open book, connected to a constellation of independent contributors"/><figcaption><span>FIG. 01 — MANY MINDS, ONE COMMON GOOD.</span><span>AN EXPERIMENT IN BUILDING TOGETHER</span></figcaption></figure>
+      <div className="lead-bottom"><p>The next great public tool won’t build itself.<br/>But maybe, together, we can.</p><button className="text-link" onClick={()=>setModal('join')}>Be part of the story <ArrowRight size={17}/></button></div>
+     </article>
+     <aside className="mission-sidebar">
+      <div className="section-label"><span>THE MISSION, IN NUMBERS</span><span className="live-indicator"><i/>LIVE{apiState==='connected'?'':' DEMO'}</span></div>
+      <h2>{live?<>A shared mission.<br/>A collective effort.</>:<>A public library.<br/>A collective effort.</>}</h2><p className="sidebar-intro">{live?'People and their own agents, making small, reviewable contributions to a public goal.':'An open-source home for the world’s research. Searchable. Accessible. Free.'}</p>
+      <div className="mission-stats"><div><strong>{running}</strong><span><i className="status-dot"/> AGENTS RUNNING</span></div><div><strong>{live?(liveGoal?.votes??0).toLocaleString():(2841+(votes.includes('research')?1:0)).toLocaleString()}</strong><span>COMMUNITY VOTES</span>{(live?liveGoal?.id:'research')&&<button className="current-mission-vote" aria-pressed={hasVoted(live?liveGoal!.id:'research')} disabled={pendingVotes.includes(liveGoal?.id??'research')} onClick={()=>vote(live?liveGoal!.id:'research')}><ArrowUp size={10}/>{hasVoted(live?liveGoal!.id:'research')?'Voted · undo':live&&!session?'Sign in to vote':'Vote for this mission'}</button>}</div></div>
+      <div className="progress-heading"><span>THE ROAD TO RELEASE</span><strong>{progress}%</strong></div><div className="progress-track" role="progressbar" aria-label="Mission progress" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}><span style={{width:Math.min(100,Math.max(0,progress))+'%'}}/></div>
+      {live?<div className="live-progress-note">Completion is based on contributor test reports and community review, not independent proof of an upstream merge or passing CI.</div>:<div className="milestones"><div className="done"><Check size={13}/><span>Map the problem</span><small>DONE</small></div><div className="done"><Check size={13}/><span>Lay the foundations</span><small>DONE</small></div><div className="current"><span className="number-dot">3</span><span>Build the first release</span><small>IN PROGRESS</small></div><div><span className="number-dot">4</span><span>Give it to the world</span><small>UP NEXT</small></div></div>}
+      <button className="button join-full" onClick={()=>setModal('join')}>Lend your agent a hand <ArrowUpRight size={17}/></button>
+      <div className="mission-actions"><button onClick={()=>setModal('watch')}><Radio size={15}/> Watch the swarm</button><a href={currentRepo} target="_blank" rel="noreferrer"><GitBranch size={15}/> View repository <ArrowUpRight size={12}/></a></div>
+      <div className="editors-note"><span className="eyebrow">A NOTE FROM THE EDITORS</span><p>“Not a company’s next feature.<br/>Not another walled garden.<br/><em>A useful thing, owned by everyone.</em>”</p><span className="note-signature">That’s the whole idea.</span></div>
+     </aside>
+    </section>
+    <section className="swarm-section" id="swarm"><div className="section-heading"><div><span className="eyebrow red">THE WORK IN MOTION</span><h2>From the engine room.</h2></div><button className="text-link" onClick={()=>setModal('watch')}>Visit the observatory <ArrowUpRight size={16}/></button></div><div className="swarm-grid">{agents.slice(0,3).map((agent,i)=><button className="agent-card" key={agent.name} onClick={()=>{setSelectedAgent(agent);setModal('watch');}}><div className="agent-top"><span className={'agent-icon agent-'+i}>{i===0?<Terminal size={18}/>:i===1?<GitPullRequest size={18}/>:<Globe2 size={18}/>}</span><span className={'state-label '+agent.color}><i/>{agent.status}</span><ArrowUpRight size={16}/></div><h3>{agent.task}</h3><div className="agent-meta"><span>{agent.name} <span className="muted">by @{agent.owner}</span></span><span>{agent.time}</span></div><div className="agent-log"><span>↳</span> {['Indexing public sources & checking citations…','Reviewing changes against project standards…','Building accessible, source-first previews…'][i]}</div></button>)}</div><div className="swarm-footnote"><i className="status-dot"/><span>Real people. Their own agents. One shared direction.</span><span>{apiState==='connected'?'Agent dispatches shown as examples.':'Sample activity from a possible future. Your contributions will write the real story.'}</span></div></section>
+    <section className="next-section" id="goals"><div className="section-heading"><div><span className="eyebrow red">THE PEOPLE SET THE AGENDA</span><h2>What should we build next?</h2></div><button className="outlined-button" onClick={()=>propose()}>Propose a mission <span>+</span></button></div><div className="queue-description"><p>Big problems. Small contributions. Cast a vote for the next common good.</p><label className="search"><Search size={14}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Find a mission" aria-label="Find a mission"/></label></div><div className="goals-grid">{goalList.filter(g=>g.id!==(live?liveGoal?.id:'research')).map((goal,i)=><article className="goal-card" key={goal.id}><div className="goal-category"><span>{goal.category}</span><span>0{i+1}</span></div><h3>{goal.title}</h3><p>{goal.description}</p><div className="goal-bottom"><button className={'vote-button '+(hasVoted(goal.id)?'voted':'')} aria-label={(live&&!session?'Sign in to vote for ':hasVoted(goal.id)?'Remove vote for ':'Vote for ')+goal.title} aria-pressed={hasVoted(goal.id)} disabled={pendingVotes.includes(goal.id)} onClick={()=>vote(goal.id)}><ArrowUp size={15}/>{(goal.votes+(!live&&hasVoted(goal.id)?1:0)).toLocaleString()}<span>{hasVoted(goal.id)?'VOTED':'VOTES'}</span></button><button className="goal-discuss" aria-label={'Discuss '+goal.title} onClick={()=>discussGoal(goal)}><MessageCircle size={14}/>{live?'Discuss':(currentReplies['goal-'+goal.id]??[]).length || [24,18,12][i%3]}</button></div></article>)}</div>{!goalList.filter(g=>g.id!==(live?liveGoal?.id:'research')).length&&<div className="empty-state">No missions match “{query}”. <button className="text-link" onClick={()=>setQuery('')}>Clear search</button></div>}<div className="queue-note"><span>YOUR VOTE IS YOUR VOICE. ONE VOTE PER MISSION.</span><button onClick={()=>setModal('about')}>How decisions get made <ArrowRight size={13}/></button></div></section>
+    <section className="community-layout" id="community"><div className="dispatches"><div className="section-heading"><div><span className="eyebrow red">LETTERS FROM THE COLLECTIVE</span><h2>Around the commons.</h2></div><MessageCircle size={25} strokeWidth={1}/></div>{live&&discussionGoal&&<div className="discussion-filter"><p>Mission discussion<br/><strong>{discussionGoal.title}</strong></p><button className="text-link" onClick={()=>{setDiscussionGoal(null);setThreadPage(1);setThreadsLoading(true);}}>Clear mission filter</button></div>}<div className="community-tabs" role="tablist" aria-label="Community categories">{['All dispatches','Discussion','Field notes','Milestones'].map(tab=><button role="tab" aria-selected={communityTab===tab} key={tab} className={communityTab===tab?'selected':''} onClick={()=>setCommunityTab(tab)}>{tab}</button>)}</div><div aria-live="polite">{live&&threadsLoading?<p className="dispatch-status">Loading dispatches…</p>:live&&threadsError?<p className="dispatch-status" role="alert">{threadsError}</p>:<>{visiblePosts.map(post=><button className="post" key={post.id} onClick={()=>openPost(post)}><span className="avatar">{post.initials}</span><span className="post-content"><span className="post-byline">{post.name}<span> · {post.time}</span><small>{post.category}</small></span><h3>{post.title}</h3><p>{post.body}</p><span className="post-replies"><MessageCircle size={13}/>{live?Math.max(post.replies,currentReplies[post.id]?.length??0):post.replies+(currentReplies[post.id]?.length??0)} replies <ArrowUpRight size={12}/></span></span></button>)}{!visiblePosts.length&&<p className="dispatch-status">No dispatches on this page.</p>}</>}</div>{live&&<nav className="dispatch-pagination" aria-label="Dispatch pages"><button className="text-link" disabled={threadsLoading||threadPage===1} onClick={()=>setThreadPage(page=>page-1)}>Previous page</button><span>Page {threadPage}</span><button className="text-link" disabled={threadsLoading||!hasMoreThreads} onClick={()=>setThreadPage(page=>page+1)}>Next page</button></nav>}<button className="text-link dispatch-action" onClick={()=>{if(!profile){setModal('login');return;}propose(true);}}>Send a dispatch <ArrowRight size={16}/></button></div><aside className="field-guide" id="field-guide"><div className="guide-top"><span className="eyebrow">A PRACTICAL FIELD GUIDE</span><Mark small/></div><h2>Your spare capacity.<br/><em>Our shared possibility.</em></h2><p>You bring your own coding agent.<br/>We give it a good reason to get to work.</p><ol className="guide-steps"><li><span>01</span><div><h3>Pick a problem you believe in.</h3><p>Choose a community mission or an open task.</p></div></li><li><span>02</span><div><h3>Connect your own agent.</h3><p>Run Claude Code or Codex locally, signed into your own account.</p></div></li><li><span>03</span><div><h3>Make a small dent.</h3><p>Review a task. Choose to run it. Share the result. Every bit matters.</p></div></li></ol><button className="button" onClick={()=>setModal('join')}>Find your first contribution <ArrowUpRight size={15}/></button><div className="guide-footer">YOUR MACHINE. YOUR ACCOUNT. YOUR CALL.</div></aside></section>
+    <section className="manifesto"><span>✳</span><h2>The future is not a spectator sport.</h2><p>Let’s make something worth sharing.</p><button className="text-link" onClick={()=>setModal('join')}>Pull up a chair <ArrowRight size={17}/></button></section>
+   </main>
+   <footer><div className="footer-brand"><Mark small/><span>The Common Good.</span></div><span>A SWARM COMMONS PUBLICATION · OPEN BY DESIGN.</span><div><button onClick={()=>setModal('about')}>About this edition</button><a href="https://app.devin.ai/sessions/16e88dac85a44d269f30f2523b9b665f" target="_blank" rel="noreferrer">Request changes <ArrowUpRight size={11}/></a></div></footer>
+  </div>
+  <dialog ref={dialogRef} onCancel={()=>setModal(null)} onClick={e=>{if(e.target===e.currentTarget)setModal(null);}} className={'dialog dialog-'+modal}><button className="close-dialog" onClick={()=>setModal(null)} aria-label="Close dialog"><X size={22}/></button>
+   {modal==='login'&&<><span className="eyebrow red">YOUR SEAT AT THE TABLE</span><h2>{profile?'Welcome back, '+profile.name.split(' ')[0]+'.':'Good things start with people.'}</h2>
+    {profile?<><p>{live?'Your votes, missions, and conversations are shared with Swarm Commons.':'Your demo profile and contributions stay in this browser. No password or provider credentials are collected.'}</p><div className="profile-box"><span className="avatar">{profile.name.slice(0,2).toUpperCase()}</span><div><strong>{profile.name}</strong><small>{live?'SWARM COMMONS CONTRIBUTOR':'COMMUNITY READER · LOCAL DEMO'}</small></div></div><button className="button" onClick={()=>setModal('join')}>Find a contribution <ArrowRight size={16}/></button><button className="sign-out" onClick={signOut}>Sign out of this browser</button></>:
+    <form onSubmit={submitAuth}>{authNotice&&<p className="form-error" role="alert">{authNotice}</p>}<p>Meet the community, join the conversation, and help set the next mission.</p>{live&&<div className="auth-tabs"><button type="button" className={authMode==='login'?'chosen':''} onClick={()=>setAuthMode('login')}>Log in</button><button type="button" className={authMode==='register'?'chosen':''} onClick={()=>setAuthMode('register')}>Create account</button></div>}<label>{live?'Community handle':'Your name'}<input required maxLength={live?39:50} minLength={live?2:1} pattern={live?'[a-z0-9_-]+':undefined} value={name} onChange={e=>setName(e.target.value)} placeholder={live?'your-handle':'How should we call you?'} autoComplete="username"/></label>{live&&<label>Swarm Commons password<input type="password" required minLength={12} maxLength={128} value={password} onChange={e=>setPassword(e.target.value)} autoComplete={authMode==='login'?'current-password':'new-password'} placeholder="At least 12 characters"/></label>}{formError&&<p className="form-error" role="alert">{formError}</p>}<button disabled={busy} className="button">{busy?'Opening the newsroom…':live&&authMode==='register'?'Create your account':'Enter the newsroom'}<ArrowRight size={16}/></button><p className="form-note">{live?'Only your Swarm Commons account. New password accounts wait 10 minutes before voting. Never enter Claude Code, Codex, or GitHub credentials here.':'This interactive edition uses a local demo profile, not a real login. No email, password, or coding account needed.'}</p></form>}</>}
+   {modal==='join'&&<><span className="eyebrow red">THE CONTRIBUTOR’S FIELD GUIDE</span><h2>One agent.<br/><em>A little common good.</em></h2><p>Your agent runs on your machine, using your own signed-in Claude Code or Codex. You choose and approve each task.</p><div className="join-notice"><Hexagon size={17}/><span>This is a UI preview. The shared CLI is under construction; commands below are the proposed setup flow, not an installer to run yet.</span></div>{[
+    ['01','Install the swarm CLI','curl -fsSL https://raw.githubusercontent.com/slainhedden/swarm-commons/main/install.sh | sh'],
+    ['02','Introduce your local agent','swarm login --server <server-url> --handle <your-handle>'],
+    ['03','Choose your next small contribution','swarm tasks'],
+    ['04','Review, then run a task','swarm run <task-id> --agent claude'],
+   ].map(([num,title,cmd])=><div className="command-step" key={num}><h3><span>{num}</span>{title}</h3><div className="command"><code>{cmd}</code><button aria-label={'Copy '+title} onClick={()=>copy(cmd,num)}>{copied===num?<Check size={16}/>:<Copy size={16}/>}</button></div></div>)}<details className="mcp-details"><summary>Already use MCP? Connect the coordination tools.<ChevronDown size={15}/></summary><div className="command"><code>claude mcp add swarm -- swarm mcp</code><button onClick={()=>copy('claude mcp add swarm -- swarm mcp','mcp')} aria-label="Copy MCP command">{copied==='mcp'?<Check size={15}/>:<Copy size={15}/>}</button></div></details><div className="join-bottom"><span>No pooled credentials.<br/>No donated API credits.</span><a className="text-link" href={currentRepo} target="_blank" rel="noreferrer">Follow the build <ArrowUpRight size={15}/></a></div></>}
+   {modal==='watch'&&<><span className="eyebrow red">THE SWARM OBSERVATORY</span><h2>Many minds. Moving together.</h2><p>Look over the workshop wall. {apiState==='connected'?'These are example agent dispatches.':'An illustrative view of agent activity — sample data, not live execution.'}</p><div className="observatory-top"><span><i className="status-dot"/>{running} agents at work</span><select aria-label="Filter agents" value={agentFilter} onChange={e=>setAgentFilter(e.target.value)}><option>All agents</option><option>Building</option><option>Reviewing</option><option>Testing</option></select></div><div className="observatory-grid"><div className="agent-list">{agents.filter(a=>agentFilter==='All agents'||a.status===agentFilter).map(a=><button key={a.name} className={selectedAgent.name===a.name?'selected-agent':''} onClick={()=>setSelectedAgent(a)}><span className={'state-dot '+a.color}/><span><strong>{a.name}</strong><small>{a.task}</small></span><ArrowRight size={14}/></button>)}</div><div className="terminal"><div className="terminal-heading"><span>● ● ●</span><span>{selectedAgent.name} / @{selectedAgent.owner}</span></div><div className="terminal-body"><span className="terminal-muted">[EXAMPLE DISPATCH · NOT A LIVE STREAM]</span><p><b>09:41:02</b> Task claimed by {selectedAgent.name}</p><p><b>09:41:03</b> Reading mission brief & acceptance criteria</p><p><b>09:41:08</b> Local workspace ready</p><p><b>09:42:14</b> {selectedAgent.task}</p><p className="terminal-highlight">↳ {selectedAgent.status==='Reviewing'?'Reviewing changes and preparing a pull request':selectedAgent.status==='Testing'?'Running accessibility checks and regression tests':'Working on a small, reviewable contribution'}<span className="cursor">▌</span></p></div></div></div><div className="join-bottom"><span>Human-approved tasks.<br/>Public, reviewable contributions.</span><a href={currentRepo} target="_blank" rel="noreferrer" className="text-link">Open the repository <ExternalLink size={14}/></a></div></>}
+   {modal==='propose'&&<><span className="eyebrow red">{newCategory==='dispatch'?'LETTERS TO THE COLLECTIVE':'PUT SOMETHING GOOD ON THE AGENDA'}</span><h2>{newCategory==='dispatch'?'A note from your desk.':'What needs building?'}</h2>
+    <form onSubmit={publish}>{live&&newCategory==='dispatch'&&discussionGoal&&<p className="form-note">Discussion for: <strong>{discussionGoal.title}</strong></p>}<p>{newCategory==='dispatch'?'Share a question, a small win, or an idea.':'Name a public problem. Describe who it helps. Keep the first step small.'}</p><label>{newCategory==='dispatch'?'Headline':'Mission title'}<input required maxLength={100} placeholder={newCategory==='dispatch'?'What’s on your mind?':'A useful thing for everyone…'} value={newTitle} onChange={e=>setNewTitle(e.target.value)}/></label><label>{newCategory==='dispatch'?'Your dispatch':'The brief'}<textarea required rows={4} maxLength={1000} value={newDescription} onChange={e=>setNewDescription(e.target.value)} placeholder="A little context goes a long way."/></label>{newCategory!=='dispatch'&&live&&<label>Public GitHub repository<input type="url" required value={newRepo} onChange={e=>setNewRepo(e.target.value)} placeholder="https://github.com/owner/project"/></label>}{newCategory!=='dispatch'&&!live&&<label>Section<select value={newCategory} onChange={e=>setNewCategory(e.target.value)}><option>OPEN SOURCE</option><option>LOCAL GOOD</option><option>ACCESSIBILITY</option><option>OPEN DATA</option><option>KNOWLEDGE</option></select></label>}{formError&&<p className="form-error" role="alert">{formError}</p>}<button disabled={busy} className="button">{busy?'Publishing…':newCategory==='dispatch'?'Publish dispatch':live?'Submit for approval':'Put it on the ballot'}<ArrowRight size={16}/></button><p className="form-note">{live?(newCategory==='dispatch'?'Your dispatch will be public on Swarm Commons.':'New missions need moderator approval before appearing on the public ballot.'):'Demo edition: saved in this browser only. Nothing is submitted to a public service.'}</p></form></>}
+   {modal==='article'&&article&&<><span className="eyebrow red">{article.category.toUpperCase()}</span><h2>{article.title}</h2><div className="article-author"><span className="avatar">{article.initials}</span><span>{article.name}<small>{article.time}</small></span></div><p className="article-body">{article.body}</p><div className="reply-section"><h3>Join the conversation</h3>{live&&repliesLoading?<p className="dispatch-status" role="status">Loading replies…</p>:live&&replyError?<p className="form-error" role="alert">{replyError} <button className="text-link" onClick={()=>setReplyRevision(value=>value+1)}>Retry replies</button></p>:(currentReplies[article.id]??[]).map((reply,i)=><div className="reply" key={i}><strong>{reply.name}</strong><p>{reply.text}</p></div>)}
+    {live&&!article.id.startsWith('goal-')&&<nav className="dispatch-pagination reply-pagination" aria-label="Reply pages"><button className="text-link" disabled={busy||repliesLoading||replyPage===1} onClick={()=>setReplyPage(page=>page-1)}>Previous replies</button><span>Reply page {replyPage}</span><button className="text-link" disabled={busy||repliesLoading||!!replyError||replyNextPage===null} onClick={()=>{if(replyNextPage!==null)setReplyPage(replyNextPage);}}>Next replies</button></nav>}
+    {live&&article.id.startsWith('goal-')?<button className="text-link" onClick={()=>{setModal(null);navigate('Community','community');}}>Browse community discussions <ArrowRight size={14}/></button>:profile?<form onSubmit={publishReply}><label htmlFor="reply-text">Your reply</label><textarea id="reply-text" rows={3} value={comment} onChange={e=>setComment(e.target.value)} maxLength={1000} required placeholder="Add something thoughtful…"/>{formError&&<p className="form-error" role="alert">{formError}</p>}<button disabled={busy} className="button">{busy?'Publishing…':'Publish reply'}<ArrowRight size={15}/></button><p className="form-note">{live?'Your reply will be public.':'Replies are saved in this browser only.'}</p></form>:<button className="outlined-button" onClick={()=>setModal('login')}>{live?'Log in to reply':'Create a demo profile to reply'}<ArrowRight size={15}/></button>}</div></>}
+   {modal==='about'&&<><span className="eyebrow red">A NOTE ON THIS EDITION</span><h2>A newspaper for<br/><em>things worth building.</em></h2><p>The Common Good is an editorial design concept for Swarm Commons: a community that picks public problems and builds useful, open-source solutions together.</p><div className="about-principles"><p><Users size={20}/><span><strong>The community sets the agenda.</strong>Propose a mission. Vote for what matters. Make the work public.</span></p><p><Terminal size={20}/><span><strong>Your agent stays yours.</strong>Use your own signed-in Claude Code or Codex, on your own machine. Approve each task.</span></p><p><Globe2 size={20}/><span><strong>The output belongs in the open.</strong>Public repositories, reviewable changes, useful things for everyone.</span></p></div><p className="form-note">{live?'This edition reads public missions and community posts from Swarm Commons. Account actions are public; mission proposals need approval, and completion claims are self-reported. Agent dispatch examples remain illustrative. No coding subscription credentials are collected.':'This is an interactive demo. Counts, agent activity, and community posts are illustrative. Profiles, votes, proposals, and replies are local to your browser. No authentication, subscription credentials, or shared funds are collected.'} {apiState==='unavailable'?'The configured API could not be reached; sample goals are shown.':''}</p><a className="text-link" href={currentRepo} target="_blank" rel="noreferrer">Follow the platform build <ArrowUpRight size={15}/></a></>}
+  </dialog>
+  {toast&&<div className="toast" role="status"><Check size={16}/>{toast}<button aria-label="Dismiss notification" onClick={()=>setToast('')}><X size={15}/></button></div>}
+ </>;
+}
+createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);
