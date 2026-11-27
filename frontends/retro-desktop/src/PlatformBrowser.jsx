@@ -106,6 +106,7 @@ export default function PlatformBrowser({ onDemo, notify }) {
   const [threadId, setThreadId] = useState(null);
   const [threadPage, setThreadPage] = useState(1);
   const [replyPage, setReplyPage] = useState(1);
+  const [replyDrafts, setReplyDrafts] = useState({});
   const [thread, setThread] = useState(null);
   const [threadError, setThreadError] = useState("");
   const [queue, setQueue] = useState(null);
@@ -145,6 +146,7 @@ export default function PlatformBrowser({ onDemo, notify }) {
     setThread(null);
     setQueue(null);
     setForm(null);
+    setReplyDrafts({});
   }, [token]);
   useEffect(() => {
     if (!token) return;
@@ -1167,17 +1169,25 @@ export default function PlatformBrowser({ onDemo, notify }) {
                         key={`${thread.id}:${session.handle}`}
                         title="Reply to this discussion"
                         submit="Post reply"
-                        fields={[bodyField]}
+                        fields={[{
+                          ...bodyField,
+                          value: replyDrafts[thread.id] || "",
+                          disabled: busy,
+                          onChange: (event) => {
+                            const body = event.target.value;
+                            setReplyDrafts((drafts) => ({ ...drafts, [thread.id]: body }));
+                          },
+                        }]}
                         busy={busy}
-                        onSubmit={async (data) =>
-                          Boolean(
-                            await mutate(
-                              `/threads/${thread.id}/comments`,
-                              data,
-                              { message: "Reply posted. Use Later replies to browse newer messages in a long discussion." },
-                            ),
-                          )
-                        }
+                        onSubmit={async (data) => {
+                          const result = await mutate(
+                            `/threads/${thread.id}/comments`,
+                            data,
+                            { message: "Reply posted. Use Later replies to browse newer messages in a long discussion." },
+                          );
+                          if (result) setReplyDrafts((drafts) => ({ ...drafts, [thread.id]: "" }));
+                          return Boolean(result);
+                        }}
                       />
                     ) : (
                       <p>Log in above to reply.</p>
