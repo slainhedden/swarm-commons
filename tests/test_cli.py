@@ -73,6 +73,25 @@ def test_run_rejects_private_repository_before_claim_or_clone(monkeypatch, capsy
     assert "public GitHub repository" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("private", [False, True])
+def test_public_repo_lookup_follows_github_repo_redirects(monkeypatch, private):
+    requested = []
+
+    def lookup(url, **kwargs):
+        requested.append(str(url))
+        if len(requested) == 1:
+            return httpx.Response(301, headers={"Location": "https://api.github.com/repositories/123"})
+        return httpx.Response(200, json={"private": private})
+
+    monkeypatch.setattr(cli.httpx, "get", lookup)
+    if private:
+        with pytest.raises(cli.SwarmError, match="public GitHub repository"):
+            cli.require_public_repo("old/project")
+    else:
+        cli.require_public_repo("old/project")
+    assert requested == ["https://api.github.com/repos/old/project", "https://api.github.com/repositories/123"]
+
+
 def test_fake_run_against_local_bare_repo(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli.httpx, "get", lambda *args, **kwargs: httpx.Response(200, json={"private": False}))
     remote = tmp_path / "remote.git"

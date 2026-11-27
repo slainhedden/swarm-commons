@@ -212,11 +212,19 @@ def report_run(client, task_id, agent):
 
 def require_public_repo(slug):
     try:
-        response = httpx.get(f"https://api.github.com/repos/{slug}", trust_env=False, timeout=5)
-        if response.status_code == 200:
-            metadata = response.json()
-            if isinstance(metadata, dict) and metadata.get("private") is False:
-                return
+        url = httpx.URL(f"https://api.github.com/repos/{slug}")
+        for _ in range(4):
+            response = httpx.get(str(url), trust_env=False, timeout=5)
+            if response.status_code == 200:
+                metadata = response.json()
+                if isinstance(metadata, dict) and metadata.get("private") is False:
+                    return
+                break
+            if not response.has_redirect_location:
+                break
+            url = url.join(response.headers["location"])
+            if (url.scheme, url.host, url.port) != ("https", "api.github.com", None) or url.userinfo:
+                break
     except (httpx.HTTPError, ValueError):
         pass
     raise SwarmError("Could not verify the target as a public GitHub repository.")
