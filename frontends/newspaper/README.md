@@ -23,6 +23,8 @@ Connected mode follows the v2 contract: proposals use `visibility` and remain of
 
 An expired bearer session (401) clears the browser's saved token and reopens sign-in instead of trapping the user in a stale profile. Sign-out always clears this browser's token even if remote revocation fails; other failures such as vote-wait 403 do not sign the account out.
 
+Connected community dispatches have previous/next pages, including older discussions beyond the first 20. Discussing a mission filters the community desk by that goal; new dispatches made there include its `goal_id`. Clear the mission filter to return to general and other mission discussions. Demo mission replies remain browser-local.
+
 The frontend falls back to clearly labeled, browser-local demo data if the API fails (including a cross-origin sign-in proxy failure). The deployed editorial showcase intentionally defaults to demo mode. Demo profiles cannot authenticate public API actions, and demo contributions never silently sync to the server. Shared API integration follows `docs/API.md`; it is compile-checked but is not end-to-end verified against the separately authenticated backend App.
 
 ### Local connected-mode check
