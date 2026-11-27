@@ -1,3 +1,4 @@
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
@@ -5,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from support import approve, live_server, test_app
 
+from swarm_commons import server
 from swarm_commons.store import connect, database
 
 
@@ -210,6 +212,27 @@ def test_claim_race_heartbeat_and_expiration(app):
     now[0] += 120
     assert browser.get(f"{PREFIX}/tasks/{task}").json()["status"] == "open"
     assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=other).status_code == 200
+
+
+def test_event_stream_limits_concurrent_clients_and_releases_slot(app, monkeypatch):
+    browser, _ = app
+    monkeypatch.setattr(server, "MAX_EVENT_STREAMS", 1)
+    with live_server(browser.app) as url, httpx.Client(timeout=5) as client:
+        path = f"{url}{PREFIX}/events/stream"
+        with client.stream("GET", path) as first:
+            assert first.status_code == 200
+            lines = first.iter_lines()
+            assert next(lines) == ": keepalive"
+            with client.stream("GET", path) as second:
+                assert second.status_code == 503
+                assert "Retry-After" in second.headers
+        deadline = time.monotonic() + 3
+        while True:
+            with client.stream("GET", path) as reopened:
+                if reopened.status_code == 200:
+                    break
+                assert reopened.status_code == 503 and time.monotonic() < deadline
+            time.sleep(0.02)
 
 
 def test_thread_replies_paginate_and_post_redirects_to_reply(app):

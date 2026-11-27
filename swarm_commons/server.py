@@ -34,6 +34,7 @@ from .store import connect, database, initialize, migrate
 
 ROOT = Path(__file__).parent
 REPLIES_PER_PAGE = 100
+MAX_EVENT_STREAMS = 32
 HANDLE = r"^[a-z0-9][a-z0-9_-]{1,38}$"
 REPO = re.compile(r"https://github\.com/[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+")
 Title = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=140)]
@@ -1141,6 +1142,16 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def api_activity(limit: int = 20):
         return activity(max(1, min(limit, 100)))
 
+    active_streams = 0
+
+    class EventStream(StreamingResponse):
+        async def __call__(self, scope, receive, send):
+            nonlocal active_streams
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                active_streams -= 1
+
     @api.get("/events/stream", response_class=StreamingResponse)
     async def api_stream(request: Request, goal_id: int | None = None, after: int = 0):
         try:
@@ -1159,8 +1170,13 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                     yield ": keepalive\n\n"
                     await asyncio.sleep(2)
 
-        return StreamingResponse(stream(), media_type="text/event-stream",
-                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        nonlocal active_streams
+        if active_streams >= MAX_EVENT_STREAMS:
+            raise HTTPException(503, "Too many active event streams.", headers={"Retry-After": "2"})
+        response = EventStream(stream(), media_type="text/event-stream",
+                               headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        active_streams += 1
+        return response
 
     @api.get("/threads", response_model=list[VotableResponse])
     def api_threads(goal_id: int | None = None, general: bool = False, page: int = 1, limit: int = 20,
