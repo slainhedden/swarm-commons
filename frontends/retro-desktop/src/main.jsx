@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArrowUpRight,
@@ -24,6 +24,7 @@ import {
 import "./style.css";
 import PlatformBrowser from "./PlatformBrowser";
 import { API_BASE } from "./api";
+import { readStored, updateStored } from "./demoStorage";
 
 const REPO = "https://github.com/slainhedden/swarm-commons";
 const SESSION =
@@ -136,21 +137,21 @@ const agentEvents = [
   },
 ];
 function useStored(key, fallback) {
-  const [value, setValue] = useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem(key)) ?? fallback;
-    } catch {
-      return fallback;
-    }
-  });
+  const [value, setValue] = useState(() => readStored(key, fallback));
+  const current = useRef(value);
   useEffect(() => {
-    try {
-      localStorage.setItem(key, JSON.stringify(value));
-    } catch {
-      /* Private browsing can disable persistent storage. */
-    }
-  }, [key, value]);
-  return [value, setValue];
+    const sync = (event) => {
+      if (event.key !== key && event.key !== null) return;
+      current.current = readStored(key, fallback);
+      setValue(current.current);
+    };
+    window.addEventListener("storage", sync);
+    return () => window.removeEventListener("storage", sync);
+  }, [key, fallback]);
+  return [value, (update) => {
+    current.current = updateStored(key, update, current.current);
+    setValue(current.current);
+  }];
 }
 function Smile({ size = 88 }) {
   return (
