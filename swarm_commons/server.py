@@ -898,15 +898,19 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 raise HTTPException(409, "You already reported this item.")
             return {"id": result["id"]}
 
-    def reset_claim(db, task_id):
-        task = db.execute("""
-            UPDATE tasks SET status = 'open', claimant = NULL, lease_until = NULL,
-                last_heartbeat = NULL, claimed_at = NULL
-            WHERE id = ? AND status = 'claimed' RETURNING goal_id
-        """, (task_id,)).fetchone()
-        if task:
+    def reset_claims(db, task_ids):
+        released = []
+        for task_id in sorted(task_ids):
+            updated = db.execute("""
+                UPDATE tasks SET status = 'open', claimant = NULL, lease_until = NULL,
+                    last_heartbeat = NULL, claimed_at = NULL
+                WHERE id = ? AND status = 'claimed'
+            """, (task_id,))
+            if updated.rowcount:
+                released.append(task_id)
+        for task_id in released:
             db.execute("DELETE FROM path_leases WHERE task_id = ?", (task_id,))
-        return task
+        return bool(released)
 
     def release(task_id, handle):
         with connect(engine, write=True) as db:
@@ -949,18 +953,18 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
                 db.execute(f"UPDATE {kind} SET visibility = ? WHERE id = ?", (statuses[data.action], item_id))
                 if data.action != "approve":
                     if kind == "tasks":
-                        for row in db.execute(f"""
+                        affected = db.execute(f"""
                             SELECT t.id FROM tasks t WHERE goal_id = ? AND status = 'claimed'
                                 AND (t.id = ? OR NOT ({TASK_ANCESTORS_APPROVED}))
-                        """, (goal_id, item_id)):
-                            reset_claim(db, row["id"])
+                        """, (goal_id, item_id))
+                        reset_claims(db, (row["id"] for row in affected))
                     elif kind == "goals":
-                        for row in db.execute("SELECT id FROM tasks WHERE goal_id = ? AND status = 'claimed'", (item_id,)):
-                            reset_claim(db, row["id"])
+                        affected = db.execute("SELECT id FROM tasks WHERE goal_id = ? AND status = 'claimed'", (item_id,))
+                        reset_claims(db, (row["id"] for row in affected))
             elif data.action in {"lock", "unlock"} and kind == "threads":
                 db.execute("UPDATE threads SET locked = ? WHERE id = ?", (int(data.action == "lock"), item_id))
             elif data.action == "release" and kind == "tasks":
-                if reset_claim(db, item_id) is None:
+                if not reset_claims(db, (item_id,)):
                     raise HTTPException(409, "Task is not claimed.")
             elif data.action == "reject_submission" and kind == "tasks":
                 changed = db.execute("""
@@ -1022,12 +1026,12 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
             db.execute("DELETE FROM sessions WHERE handle = ?", (target,))
             for table in ("goals", "tasks", "threads", "comments", "notes"):
                 db.execute(f"UPDATE {table} SET visibility = 'hidden' WHERE author = ? AND visibility <> 'deleted'", (target,))
-            for item in db.execute(f"""
+            affected = db.execute(f"""
                 SELECT t.id FROM tasks t WHERE status = 'claimed' AND (claimant = ? OR visibility = 'hidden'
                     OR NOT ({TASK_ANCESTORS_APPROVED})
                     OR EXISTS (SELECT 1 FROM goals WHERE goals.id = t.goal_id AND visibility = 'hidden'))
-            """, (target,)):
-                reset_claim(db, item["id"])
+            """, (target,))
+            reset_claims(db, (row["id"] for row in affected))
             for table in ("goal_votes", "task_votes", "thread_votes", "comment_votes"):
                 db.execute(f"DELETE FROM {table} WHERE handle = ?", (target,))
             db.execute("INSERT INTO moderation_audit VALUES (?, ?, ?, ?, ?)",

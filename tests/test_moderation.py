@@ -3,6 +3,8 @@ from fastapi.testclient import TestClient
 from support import ADMIN, approve, test_app
 from test_api import PREFIX, contributor, password_account, proposal
 
+from swarm_commons.store import Connection
+
 
 GOAL = {"title": "<b>Docs</b><script>alert(1)</script>", "description": "Public", "repo_url": "https://github.com/example/docs"}
 TASK = {"title": "Write docs", "description": "Review setup", "criteria": "Check references"}
@@ -97,6 +99,34 @@ def test_goal_owner_can_approve_pending_task_before_goal_is_public(tmp_path):
         assert browser.post(route, headers=stranger, json=decision).status_code == 404
         assert browser.post(route, headers=owner, json=decision).status_code == 200
         assert browser.get(f"{PREFIX}/tasks/{task}").status_code == 404
+
+
+def test_bulk_moderation_resets_task_rows_before_deleting_path_leases(tmp_path, monkeypatch):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        worker = contributor(browser, "worker")
+        goal, first = proposal(browser, owner)
+        second = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=owner, json=TASK).json()["id"]
+        approve(browser, "tasks", second)
+        for task in (first, second):
+            endpoint = f"{PREFIX}/tasks/{task}"
+            assert browser.post(f"{endpoint}/claim", headers=worker).status_code == 200
+            assert browser.post(f"{endpoint}/path-leases", headers=worker, json={"path": f"file-{task}"}).status_code == 201
+        calls = []
+        execute = Connection.execute
+
+        def track(db, sql, params=()):
+            statement = sql.strip()
+            if statement.startswith("UPDATE tasks SET status = 'open'"):
+                calls.append(("task", params[0]))
+            if statement.startswith("DELETE FROM path_leases"):
+                calls.append(("lease", params[0]))
+            return execute(db, sql, params)
+
+        monkeypatch.setattr(Connection, "execute", track)
+        assert browser.post(f"{PREFIX}/moderation/goals/{goal}", headers=ADMIN,
+                            json={"action": "hide", "reason": "Removed"}).status_code == 200
+        assert calls == [("task", first), ("task", second), ("lease", first), ("lease", second)]
 
 
 def test_hidden_subtask_heartbeat_does_not_hold_claim_capacity(tmp_path):
