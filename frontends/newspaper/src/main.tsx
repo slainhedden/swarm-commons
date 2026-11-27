@@ -2,11 +2,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ArrowUpRight, ArrowRight, ArrowUp, Check, ChevronDown, Copy, ExternalLink, GitBranch, GitPullRequest, Globe2, Hexagon, MessageCircle, Radio, Search, Terminal, Users, X } from 'lucide-react';
 import './style.css';
-import { ApiError, apiBase, request, loadSession, saveSession, githubUrl, type ApiGoal, type ApiThread, type ApiSession } from './api';
+import { ApiError, apiBase, request, requestThreadPage, loadSession, saveSession, githubUrl, type ApiGoal, type ApiThread, type ApiSession } from './api';
 
 type Goal = { id: string; title: string; category: string; description: string; votes: number; tasks?: number; viewerVoted?:boolean };
 type Post = { id: string; name: string; initials: string; time: string; title: string; body: string; replies: number; category: string };
-type ThreadPage = ApiThread & {comments:{author:string;body:string}[];comments_page:number;comments_next_page:number|null};
 type Agent = { name: string; owner: string; task: string; status: string; color: string; time: string };
 type Modal = 'login' | 'join' | 'watch' | 'propose' | 'about' | 'article' | null;
 const REPO = 'https://github.com/slainhedden/swarm-commons';
@@ -119,7 +118,7 @@ function App(){
   if(!live||modal!=='article'||!article||article.id.startsWith('goal-'))return;
   const controller=new AbortController();
   setRepliesLoading(true);setReplyError('');
-  request<ThreadPage>('/threads/'+article.id+'?page='+replyPage,{signal:controller.signal,token:session?.token}).then(thread=>{
+  requestThreadPage(article.id,replyPage,{signal:controller.signal,token:session?.token}).then(thread=>{
    if(controller.signal.aborted)return;
    setLiveReplies(previous=>({...previous,[article.id]:thread.comments.map(c=>({name:c.author,text:c.body}))}));
    setReplyNextPage(thread.comments_next_page);
@@ -154,7 +153,7 @@ function App(){
    if(live){
     await request('/threads/'+article.id+'/comments',{method:'POST',token:session?.token,body:{body:comment.trim()}});
     published=true;setComment('');
-    const updated=await request<ThreadPage>('/threads/'+article.id+'?page=1',{token:session?.token});
+    const updated=await requestThreadPage(article.id,1,{token:session?.token});
     setReplyPage(Math.max(1,Math.ceil(updated.comment_count/100)));
     setReplyRevision(value=>value+1);setThreadRevision(value=>value+1);
    }else{

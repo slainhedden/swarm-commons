@@ -1,5 +1,6 @@
 export type ApiGoal = {id:number;title:string;description:string;repo_url:string;votes:number;task_count:number;visibility?:'pending'|'approved'|'rejected'|'hidden';viewer_voted?:boolean;progress:{total:number;open:number;claimed:number;submitted:number;done:number;percent_done:number}};
 export type ApiThread = {id:number;author:string;title:string;body:string;comment_count:number;created_at:number};
+export type ApiThreadPage = ApiThread & {comments:{author:string;body:string}[];comments_page:number;comments_next_page:number|null};
 export type ApiSession = {handle:string;token:string};
 export const apiBase = ((import.meta as unknown as {env:Record<string,string>}).env.VITE_API_BASE ?? '').replace(/\/$/,'');
 export class ApiError extends Error {
@@ -12,5 +13,12 @@ export async function request<T>(path:string,options:{method?:string;body?:unkno
  return response.json();
 }
 export function loadSession():ApiSession|null {try{return JSON.parse(sessionStorage.getItem('common-good-session')??'null');}catch{return null;}}
+export async function requestThreadPage(id:string,page:number,options:{token?:string;signal?:AbortSignal}={}){
+ const thread=await request<ApiThreadPage>('/threads/'+id+'?page='+page,options);
+ if(thread.comments_page!==page||!(thread.comments_next_page===null||(Number.isInteger(thread.comments_next_page)&&thread.comments_next_page>page))){
+  throw new Error('Discussion replies are unavailable on this server version. Please try again after the server is updated.');
+ }
+ return thread;
+}
 export function saveSession(session:ApiSession|null){try{session?sessionStorage.setItem('common-good-session',JSON.stringify(session)):sessionStorage.removeItem('common-good-session');}catch{}}
 export function githubUrl(url:string){try{const parsed=new URL(url);return parsed.protocol==='https:'&&parsed.hostname==='github.com'?parsed.href:'https://github.com/slainhedden/swarm-commons';}catch{return 'https://github.com/slainhedden/swarm-commons';}}
