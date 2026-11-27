@@ -1,0 +1,9 @@
+{
+  "name": "swarm-commons-crt-terminal",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": { "dev": "vite --host 0.0.0.0", "build": "vite build", "start": "node server.mjs", "test": "node --test test/*.test.mjs" },
+  "dependencies": { "react": "^18.3.1", "react-dom": "^18.3.1" },
+  "devDependencies": { "vite": "^6.1.0" }
+}
