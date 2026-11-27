@@ -32,6 +32,8 @@ The built-in browser manifest provides PNG home-screen icons. Google Fonts are o
 - Submitted work is awaiting review; done states remain contributor attestations, not verified upstream CI or merges. Submitted PRs are linked from the flight plan.
 - Contributors can release their own active claim from the mission details. Local-agent execution, task selection, heartbeat, and orchestration remain in the official CLI/MCP, not the browser.
 - Connected discussions support mission-linked or general (Getting started) topics. Dispatches and editable goal focus areas are demo-only because the shared API does not store these categories.
+- Connected Community has newer/older page navigation; category filters apply to the current page. SSE refreshes retain the selected page, and posting a new discussion returns to the newest page.
+- API outages at startup preserve saved fallback proposals, discussions, and replies. Live snapshots never overwrite these browser-local contributions.
 - An expired bearer clears the signed-in profile and retries read-only requests anonymously, keeping the public platform visible. Failed mutations are never retried or turned into demo writes.
 
 ## Deployment

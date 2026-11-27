@@ -127,16 +127,19 @@ export type Snapshot = {
   featured: ApiGoal | null;
   tasks: ApiTask[];
   threads: ApiThread[];
+  threadPage: number;
+  hasOlderThreads: boolean;
   activity: ApiActivity[];
   stats: { agents_running: number; contributors: number; prs_merged: number };
   missionStats: { agents_running: number } | null;
 };
-export async function snapshot(): Promise<Snapshot> {
+const THREAD_PAGE_SIZE = 20;
+export async function snapshot(threadPage = 1): Promise<Snapshot> {
   const [goals, featured, tasks, threads, activity, stats] = await Promise.all([
     request<ApiGoal[]>("/goals"),
     request<ApiGoal | null>("/goals/featured"),
     request<ApiTask[]>("/tasks"),
-    request<ApiThread[]>("/threads"),
+    request<ApiThread[]>(`/threads?page=${threadPage}&limit=${THREAD_PAGE_SIZE}`),
     request<ApiActivity[]>("/activity?limit=30"),
     request<Snapshot["stats"]>("/stats"),
   ]);
@@ -151,5 +154,15 @@ export async function snapshot(): Promise<Snapshot> {
   const missionStats = featured
     ? await request<{ agents_running: number }>(`/stats?goal_id=${featured.id}`)
     : null;
-  return { goals, featured, tasks, threads, activity, stats, missionStats };
+  return {
+    goals,
+    featured,
+    tasks,
+    threads,
+    activity,
+    stats,
+    missionStats,
+    threadPage,
+    hasOlderThreads: threads.length === THREAD_PAGE_SIZE,
+  };
 }

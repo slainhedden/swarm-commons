@@ -538,6 +538,9 @@ function App() {
   const [mobileNav, setMobileNav] = useState(false);
   const scope = api.API_BASE ? `:${api.API_BASE}` : "";
   const [remote, setRemote] = useState<api.Snapshot | null>(null);
+  const [threadPage, setThreadPage] = useState(1);
+  const threadPageRef = useRef(1);
+  const [threadsLoading, setThreadsLoading] = useState(false);
   const [user, setUser] = useStored(`swarm.mc.user${scope}`, "");
   // Live snapshots must not overwrite browser-local fallback contributions.
   const [goals, setGoals] = useStored<Goal[]>(
@@ -629,8 +632,16 @@ function App() {
       })),
     );
   }
+  function changeThreadPage(nextPage: number) {
+    threadPageRef.current = nextPage;
+    setThreadPage(nextPage);
+    setSelectedThread(null);
+  }
   async function refresh() {
-    applySnapshot(await api.snapshot());
+    const currentPage = threadPageRef.current;
+    const data = await api.snapshot(currentPage);
+    // An SSE refresh from the previous page must not replace the selected page.
+    if (currentPage === threadPageRef.current) applySnapshot(data);
   }
   useEffect(() => {
     function expired() {
@@ -643,16 +654,25 @@ function App() {
   useEffect(() => {
     if (!api.API_BASE) return;
     let disposed = false;
+    setThreadsLoading(true);
     api
-      .snapshot()
+      .snapshot(threadPage)
       .then((data) => {
         if (!disposed) applySnapshot(data);
       })
-      .catch(() => {
+      .catch((e) => {
         if (!disposed) {
-          setConnection("fallback");
-          setUser("");
+          if (remote) {
+            setToast(e.message);
+            changeThreadPage(remote.threadPage);
+          } else {
+            setConnection("fallback");
+            setUser("");
+          }
         }
+      })
+      .finally(() => {
+        if (!disposed) setThreadsLoading(false);
       });
     if (api.hasToken())
       api
@@ -669,7 +689,7 @@ function App() {
     return () => {
       disposed = true;
     };
-  }, []);
+  }, [threadPage]);
   useEffect(() => {
     if (!live) return;
     const stream = new EventSource(`${api.API_BASE}/events/stream`);
@@ -1004,7 +1024,8 @@ function App() {
               : {}),
           }),
         });
-        await refresh();
+        if (threadPageRef.current === 1) await refresh();
+        else changeThreadPage(1);
       } else
         setThreads((ts) => [
           {
@@ -1855,7 +1876,7 @@ function App() {
                 </button>
               </div>
               <div className="community-layout">
-                <div className="panel discussion-list">
+                <div className="panel discussion-list" aria-busy={threadsLoading}>
                   {threads
                     .filter(
                       (t) =>
@@ -1891,8 +1912,36 @@ function App() {
                       t.category === category,
                   ) && (
                     <div className="empty-state">
-                      No transmissions yet. Start the conversation.
+                      {live
+                        ? "No discussions in this category on this page."
+                        : "No transmissions yet. Start the conversation."}
                     </div>
+                  )}
+                  {live && remote && (
+                    <nav
+                      className="discussion-pagination"
+                      aria-label="Discussion pages"
+                    >
+                      <button
+                        className="button secondary"
+                        disabled={
+                          threadsLoading || busy || remote.threadPage === 1
+                        }
+                        onClick={() => changeThreadPage(remote.threadPage - 1)}
+                      >
+                        Newer discussions
+                      </button>
+                      <span aria-live="polite">Page {remote.threadPage}</span>
+                      <button
+                        className="button secondary"
+                        disabled={
+                          threadsLoading || busy || !remote.hasOlderThreads
+                        }
+                        onClick={() => changeThreadPage(remote.threadPage + 1)}
+                      >
+                        Older discussions
+                      </button>
+                    </nav>
                   )}
                 </div>
                 <aside className="panel community-about">

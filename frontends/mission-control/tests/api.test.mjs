@@ -192,3 +192,28 @@ test("rejects an unexpected platform payload instead of presenting it as a conne
   globalThis.fetch = async () => Response.json({ unexpected: true });
   await assert.rejects(adapter.snapshot(), /Unexpected platform response/);
 });
+
+test("loads older discussion pages and disables older navigation on a partial last page", async () => {
+  const paths = [];
+  globalThis.fetch = async (url) => {
+    const path = String(url).replace(adapter.API_BASE, "");
+    paths.push(path);
+    return Response.json(
+      path.startsWith("/threads?")
+        ? path.includes("page=2&")
+          ? [{ id: 1, title: "The oldest discussion" }]
+          : Array.from({ length: 20 }, (_, i) => ({ id: 21 - i }))
+        : path === "/stats"
+          ? { agents_running: 0, contributors: 0, prs_merged: 0 }
+          : path === "/goals/featured" ? null : [],
+    );
+  };
+  const latest = await adapter.snapshot();
+  assert.equal(latest.threadPage, 1);
+  assert.equal(latest.hasOlderThreads, true);
+  const older = await adapter.snapshot(2);
+  assert.equal(older.threadPage, 2);
+  assert.equal(older.threads[0].title, "The oldest discussion");
+  assert.equal(older.hasOlderThreads, false);
+  assert.ok(paths.includes("/threads?page=2&limit=20"));
+});

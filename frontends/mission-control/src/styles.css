@@ -1635,6 +1635,17 @@ footer a {
 .timeline-row > .text-button {
   margin-left: 20px;
 }
+.discussion-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 11px;
+}
 .empty-state {
   padding: 35px;
   text-align: center;
