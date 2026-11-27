@@ -26,6 +26,50 @@ export function toggleGoalVote(id: number, voted: boolean) {
     method: voted ? "DELETE" : "POST",
   });
 }
+export function subscribeEvents(
+  onMessage: () => void,
+  onConnection: (connected: boolean) => void,
+) {
+  let stream: EventSource;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  let attempts = 0;
+  let disposed = false;
+  function connect() {
+    if (disposed) return;
+    const current = new EventSource(`${API_BASE}/events/stream`);
+    stream = current;
+    current.onopen = () => {
+      if (disposed || stream !== current) return;
+      attempts = 0;
+      onConnection(true);
+    };
+    current.onmessage = () => {
+      if (!disposed && stream === current) onMessage();
+    };
+    current.onerror = () => {
+      if (disposed || stream !== current) return;
+      onConnection(false);
+      // HTTP 429/503 can terminate EventSource permanently, unlike a transient
+      // disconnect. Recreate only a CLOSED source; let native retries continue.
+      if (current.readyState === EventSource.CLOSED && retry === undefined) {
+        current.close();
+        retry = setTimeout(
+          () => {
+            retry = undefined;
+            connect();
+          },
+          Math.min(30000, 1000 * 2 ** attempts++),
+        );
+      }
+    };
+  }
+  connect();
+  return () => {
+    disposed = true;
+    stream.close();
+    if (retry !== undefined) clearTimeout(retry);
+  };
+}
 export async function request<T>(
   path: string,
   options: RequestInit = {},

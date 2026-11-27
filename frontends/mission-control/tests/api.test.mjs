@@ -23,6 +23,7 @@ const adapter = await import(
   `data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`
 );
 const originalFetch = globalThis.fetch;
+const originalEventSource = globalThis.EventSource;
 beforeEach(() => {
   const values = new Map();
   globalThis.sessionStorage = {
@@ -33,6 +34,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  globalThis.EventSource = originalEventSource;
 });
 
 test("authenticated writes use the configured platform and tab-scoped bearer session", async () => {
@@ -290,4 +292,76 @@ test("another contributor posting later cannot move our reply onto the wrong pag
     "/api/v1/threads/7?page=3",
     "/api/v1/threads/7?page=2",
   ]);
+});
+
+test("recreates a capacity-closed event stream with backoff and resumes updates", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const streams = [];
+  globalThis.EventSource = class {
+    static CLOSED = 2;
+    readyState = 0;
+    constructor(url) {
+      this.url = url;
+      streams.push(this);
+    }
+    close() {
+      this.readyState = 2;
+    }
+  };
+  const states = [];
+  let messages = 0;
+  const stop = adapter.subscribeEvents(
+    () => messages++,
+    (state) => states.push(state),
+  );
+  streams[0].readyState = 2;
+  streams[0].onerror();
+  streams[0].onerror();
+  t.mock.timers.tick(999);
+  assert.equal(streams.length, 1);
+  t.mock.timers.tick(1);
+  assert.equal(streams.length, 2);
+  assert.equal(streams[1].url, adapter.API_BASE + "/events/stream");
+  streams[1].readyState = 2;
+  streams[1].onerror();
+  t.mock.timers.tick(1999);
+  assert.equal(streams.length, 2);
+  t.mock.timers.tick(1);
+  assert.equal(streams.length, 3);
+  streams[2].onopen();
+  streams[2].onmessage();
+  assert.equal(states.at(-1), true);
+  assert.equal(messages, 1);
+  streams[2].readyState = 2;
+  streams[2].onerror();
+  stop();
+  t.mock.timers.tick(60000);
+  assert.equal(streams.length, 3);
+  streams[2].onmessage();
+  assert.equal(messages, 1);
+});
+
+test("does not create a competing stream while native reconnect is pending", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let connections = 0;
+  let source;
+  globalThis.EventSource = class {
+    static CLOSED = 2;
+    readyState = 0;
+    constructor() {
+      source = this;
+      connections++;
+    }
+    close() {
+      this.readyState = 2;
+    }
+  };
+  const stop = adapter.subscribeEvents(
+    () => {},
+    () => {},
+  );
+  source.onerror();
+  t.mock.timers.tick(60000);
+  assert.equal(connections, 1);
+  stop();
 });

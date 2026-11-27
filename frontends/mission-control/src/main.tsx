@@ -709,19 +709,22 @@ function App() {
   }, [threadPage]);
   useEffect(() => {
     if (!live) return;
-    const stream = new EventSource(`${api.API_BASE}/events/stream`);
     let timer: ReturnType<typeof setTimeout> | undefined;
-    stream.onmessage = () => {
-      if (!timer)
-        timer = setTimeout(() => {
-          timer = undefined;
-          refresh().catch(() => setConnection("reconnecting"));
-        }, 500);
-    };
-    stream.onerror = () => setConnection("reconnecting");
-    stream.onopen = () => setConnection("live");
+    const stop = api.subscribeEvents(
+      () => {
+        if (!timer)
+          timer = setTimeout(() => {
+            timer = undefined;
+            refresh().catch(() => setConnection("reconnecting"));
+          }, 500);
+      },
+      (connected) => {
+        setConnection(connected ? "live" : "reconnecting");
+        if (connected) refresh().catch(() => setConnection("reconnecting"));
+      },
+    );
     return () => {
-      stream.close();
+      stop();
       if (timer) clearTimeout(timer);
     };
   }, [live]);
