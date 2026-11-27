@@ -1,0 +1,28 @@
+{
+  "name": "swarm-notebook",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "start": "sirv dist --single --host 0.0.0.0",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@fontsource/caveat": "^5.2.6",
+    "@fontsource/dm-sans": "^5.2.6",
+    "@fontsource/patrick-hand": "^5.2.6",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "sirv-cli": "^2.0.2"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "~5.7.2",
+    "vite": "^6.0.5"
+  }
+}
