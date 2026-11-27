@@ -88,13 +88,19 @@ function App(){
  useEffect(()=>{
   if(!live)return;
   const controller=new AbortController();
+  const pageSize=20;
   const update=async()=>{
    setThreadsLoading(true);setThreadsError('');
    try{
-    const threads=await request<ApiThread[]>('/threads?page='+threadPage+'&limit=20'+(discussionGoal?'&goal_id='+encodeURIComponent(discussionGoal.id):''),{signal:controller.signal,token:session?.token});
+    const goalFilter=discussionGoal?'&goal_id='+encodeURIComponent(discussionGoal.id):'';
+    // With limit=1, page=offset+1 probes the next item without skipping a dispatch.
+    const [threads,nextThread]=await Promise.all([
+     request<ApiThread[]>('/threads?page='+threadPage+'&limit='+pageSize+goalFilter,{signal:controller.signal,token:session?.token}),
+     request<ApiThread[]>('/threads?page='+(threadPage*pageSize+1)+'&limit=1'+goalFilter,{signal:controller.signal,token:session?.token})
+    ]);
     if(controller.signal.aborted)return;
     setRemotePosts(threads.map(t=>({id:String(t.id),name:t.author,initials:t.author.slice(0,2).toUpperCase(),time:new Date(t.created_at*1000).toLocaleDateString(),title:t.title,body:t.body,replies:t.comment_count,category:'Discussion'})));
-    setHasMoreThreads(threads.length===20);
+    setHasMoreThreads(nextThread.length>0);
    }catch(error){
     if(!controller.signal.aborted&&!recoverSession(error))setThreadsError((error as Error).message);
    }finally{if(!controller.signal.aborted)setThreadsLoading(false);}
