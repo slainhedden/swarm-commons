@@ -136,7 +136,12 @@ def stream_run(provider, command, workspace, minutes, policy):
 
 def run_provider(provider, prompt, workspace, task_id, minutes, policy, swarm, launcher=None):
     if provider == "fake":
-        (workspace / "SWARM-FAKE-RESULT.md").write_text("Fake agent result for local testing.\n")
+        output = workspace.resolve() / "SWARM-FAKE-RESULT.md"
+        try:
+            with output.open("x", encoding="utf-8") as result:
+                result.write("Fake agent result for local testing.\n")
+        except FileExistsError:
+            raise SwarmError("Refusing to overwrite an existing fake agent output.") from None
         return Usage(0, 0, 1)
     with tempfile.TemporaryDirectory(prefix="swarm-config-") as config:
         command = provider_command(provider, prompt, workspace, task_id, policy, Path(config), swarm, launcher)

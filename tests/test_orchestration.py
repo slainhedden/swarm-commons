@@ -10,7 +10,7 @@ from support import approve, test_app
 from swarm_commons import guards, verification
 from swarm_commons.client import SwarmError, SwarmUnavailable
 from swarm_commons.local import Policy, usage_reservation
-from swarm_commons.providers import provider_command, stream_run
+from swarm_commons.providers import provider_command, run_provider, stream_run
 from test_api import PREFIX, contributor, proposal
 
 
@@ -132,6 +132,18 @@ print(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 18, 'outpu
     assert (usage.turns, usage.input_tokens, usage.output_tokens) == (1, 18, 7)
     with pytest.raises(SwarmError, match="1-turn limit"):
         stream_run("codex", [sys.executable, "-c", script + "\nprint(json.dumps({'type':'turn.started'}))"], tmp_path, 1, policy)
+
+
+def test_fake_provider_refuses_symlink_output(tmp_path):
+    workspace = tmp_path / "worktree"
+    workspace.mkdir()
+    target = tmp_path / "untouched.md"
+    target.write_text("original")
+    (workspace / "SWARM-FAKE-RESULT.md").symlink_to(target)
+
+    with pytest.raises(SwarmError, match="fake agent output"):
+        run_provider("fake", "", workspace, 1, 1, Policy(), "swarm")
+    assert target.read_text() == "original"
 
 
 def test_verification_runs_only_in_locked_down_docker(tmp_path, monkeypatch):
