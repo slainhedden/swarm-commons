@@ -1,0 +1,344 @@
+import pytest
+from fastapi.testclient import TestClient
+from support import ADMIN, approve, test_app
+from test_api import PREFIX, contributor, password_account, proposal
+
+from swarm_commons.store import Connection
+
+
+GOAL = {"title": "<b>Docs</b><script>alert(1)</script>", "description": "Public", "repo_url": "https://github.com/example/docs"}
+TASK = {"title": "Write docs", "description": "Review setup", "criteria": "Check references"}
+
+
+def test_proposal_approval_note_reports_and_ban(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = password_account(browser, "owner")
+        worker = contributor(browser, "worker")
+        created = browser.post(f"{PREFIX}/goals", json=GOAL, headers=owner).json()
+        goal = created["id"]
+        assert created["visibility"] == "pending" and created["title"] == GOAL["title"]
+        assert browser.get(f"{PREFIX}/goals").json() == []
+        assert browser.get(f"{PREFIX}/goals/{goal}").status_code == 404
+        assert browser.get(f"{PREFIX}/goals/{goal}", headers=owner).status_code == 200
+        decision = {"action": "approve", "reason": "Reviewed"}
+        assert browser.post(f"{PREFIX}/moderation/goals/{goal}", json=decision, headers=owner).status_code == 403
+        approve(browser, "goals", goal)
+        rendered = browser.get(f"/goals/{goal}").text
+        assert "&lt;b&gt;Docs&lt;/b&gt;&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
+        assert "<script>alert(1)</script>" not in rendered
+        task = browser.post(f"{PREFIX}/goals/{goal}/tasks", json=TASK, headers=worker).json()["id"]
+        assert browser.get(f"{PREFIX}/tasks?available=true").json() == []
+        assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=worker).status_code == 409
+        assert browser.post(f"{PREFIX}/moderation/tasks/{task}", json=decision, headers=owner).status_code == 200
+        assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=worker).status_code == 200
+        note = browser.post(f"{PREFIX}/goals/{goal}/notes", json={"body": "Untrusted note"}, headers=worker).json()["id"]
+        reported = browser.post(f"{PREFIX}/notes/{note}/report", json={"reason": "Abuse"}, headers=owner)
+        assert reported.status_code == 201
+        assert browser.get(f"{PREFIX}/moderation/queue", headers=ADMIN).json()["reports"][0]["item_id"] == note
+        assert browser.post(f"{PREFIX}/moderation/notes/{note}", json={
+            "action": "hide", "reason": "Removed",
+        }, headers=ADMIN).status_code == 200
+        assert browser.get(f"{PREFIX}/goals/{goal}/notes").json() == []
+        assert browser.post(f"{PREFIX}/moderation/contributors/worker/ban", json={
+            "reason": "Account abuse",
+        }, headers=ADMIN).status_code == 200
+        assert browser.get(f"{PREFIX}/me", headers=worker).status_code == 401
+        assert browser.get(f"{PREFIX}/tasks/{task}").status_code == 404
+
+
+def test_code_and_markup_are_preserved_as_text(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        member = contributor(browser, "member")
+        body = '#include <stdio.h>\n<img src=x onerror="alert(1)">'
+        thread = browser.post(f"{PREFIX}/threads", headers=member, json={"title": "C examples", "body": body}).json()
+        assert browser.get(f"{PREFIX}/threads/{thread['id']}").json()["body"] == body
+        rendered = browser.get(f"/forum/{thread['id']}").text
+        assert "#include &lt;stdio.h&gt;" in rendered
+        assert "&lt;img src=x onerror=" in rendered
+        assert "<img src=x" not in rendered
+
+
+def test_reports_do_not_reveal_children_of_hidden_parents(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        outsider = contributor(browser, "outsider")
+        goal, task = proposal(browser, owner)
+        thread = browser.post(f"{PREFIX}/threads", headers=owner, json={
+            "goal_id": goal, "title": "Topic", "body": "Discussion",
+        }).json()["id"]
+        reply = browser.post(f"{PREFIX}/threads/{thread}/comments", headers=owner, json={"body": "Reply"}).json()["id"]
+        note = browser.post(f"{PREFIX}/goals/{goal}/notes", headers=owner, json={"body": "Note"}).json()["id"]
+        child = browser.post(f"{PREFIX}/tasks/{task}/subtasks", headers=owner, json={"tasks": [TASK]}).json()[0]["id"]
+        approve(browser, "tasks", child)
+        assert f'id="task-{child}"' in browser.get(f"/goals/{goal}").text
+        hide = {"action": "hide", "reason": "Removed"}
+        report = {"reason": "Report"}
+        for kind, parent, children in (
+            ("tasks", task, [("tasks", child)]),
+            ("threads", thread, [("comments", reply)]),
+            ("goals", goal, [("tasks", task), ("threads", thread), ("notes", note), ("comments", reply)]),
+        ):
+            assert browser.post(f"{PREFIX}/moderation/{kind}/{parent}", headers=ADMIN, json=hide).status_code == 200
+            for child_kind, child_id in children:
+                assert browser.post(f"{PREFIX}/{child_kind}/{child_id}/report", headers=outsider,
+                                    json=report).status_code == 404
+            if kind == "tasks":
+                assert f'id="task-{child}"' not in browser.get(f"/goals/{goal}").text
+                assert browser.get(f"{PREFIX}/tasks/{child}").status_code == 404
+                assert browser.post(f"{PREFIX}/tasks/{child}/claim", headers=outsider).status_code == 404
+
+
+def test_goal_owner_can_approve_pending_task_before_goal_is_public(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        stranger = contributor(browser, "stranger")
+        goal = browser.post(f"{PREFIX}/goals", headers=owner, json=GOAL).json()["id"]
+        task = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=owner, json=TASK).json()["id"]
+        route = f"{PREFIX}/moderation/tasks/{task}"
+        decision = {"action": "approve", "reason": "Reviewed"}
+        assert browser.post(route, headers=stranger, json=decision).status_code == 404
+        assert browser.post(route, headers=owner, json=decision).status_code == 200
+        assert browser.get(f"{PREFIX}/tasks/{task}").status_code == 404
+
+
+def test_bulk_moderation_resets_task_rows_before_deleting_path_leases(tmp_path, monkeypatch):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        worker = contributor(browser, "worker")
+        goal, first = proposal(browser, owner)
+        second = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=owner, json=TASK).json()["id"]
+        approve(browser, "tasks", second)
+        for task in (first, second):
+            endpoint = f"{PREFIX}/tasks/{task}"
+            assert browser.post(f"{endpoint}/claim", headers=worker).status_code == 200
+            assert browser.post(f"{endpoint}/path-leases", headers=worker, json={"path": f"file-{task}"}).status_code == 201
+        calls = []
+        execute = Connection.execute
+
+        def track(db, sql, params=()):
+            statement = sql.strip()
+            if statement.startswith("UPDATE tasks SET status = 'open'"):
+                calls.append(("task", params[0]))
+            if statement.startswith("DELETE FROM path_leases"):
+                calls.append(("lease", params[0]))
+            return execute(db, sql, params)
+
+        monkeypatch.setattr(Connection, "execute", track)
+        assert browser.post(f"{PREFIX}/moderation/goals/{goal}", headers=ADMIN,
+                            json={"action": "hide", "reason": "Removed"}).status_code == 200
+        assert calls == [("task", first), ("task", second), ("lease", first), ("lease", second)]
+
+
+def test_hidden_subtask_heartbeat_does_not_hold_claim_capacity(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False, claim_cap=1)) as browser:
+        owner = contributor(browser, "owner")
+        worker = contributor(browser, "worker")
+        goal, parent = proposal(browser, owner)
+        task = browser.post(f"{PREFIX}/tasks/{parent}/subtasks", headers=owner, json={"tasks": [TASK]}).json()[0]["id"]
+        other = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=owner, json=TASK).json()["id"]
+        approve(browser, "tasks", task)
+        approve(browser, "tasks", other)
+        assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=worker).status_code == 200
+        assert browser.post(f"{PREFIX}/tasks/{other}/claim", headers=worker).status_code == 409
+        path = f"{PREFIX}/moderation/tasks/{parent}"
+        assert browser.post(path, headers=ADMIN, json={"action": "hide", "reason": "Removed"}).status_code == 200
+        assert browser.post(f"{PREFIX}/tasks/{task}/heartbeat", headers=worker).status_code != 200
+        assert browser.post(f"{PREFIX}/tasks/{other}/claim", headers=worker).status_code == 200
+        assert browser.post(path, headers=ADMIN, json={"action": "approve", "reason": "Restored"}).status_code == 200
+        restored = browser.get(f"{PREFIX}/tasks/{task}").json()
+        assert restored["status"] == "open" and restored["lease_until"] is None
+
+
+def test_ban_removes_activity_from_a_different_authors_task(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        worker = contributor(browser, "worker")
+        _, task = proposal(browser, owner)
+        assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=worker).status_code == 200
+        event = browser.post(f"{PREFIX}/tasks/{task}/events", headers=worker,
+                             json={"kind": "progress", "summary": "Public run message"}).json()
+        assert event in browser.get(f"{PREFIX}/activity").json()
+        assert browser.post(f"{PREFIX}/moderation/contributors/worker/ban", headers=ADMIN,
+                            json={"reason": "Suspended"}).status_code == 200
+        assert browser.get(f"{PREFIX}/tasks/{task}").status_code == 200
+        events = browser.get(f"{PREFIX}/activity").json()
+        assert all(item["actor"] != "worker" for item in events)
+        assert any(item["kind"] == "moderated" for item in events)
+
+
+def test_claim_does_not_disclose_hidden_task_or_hidden_goal(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        owner = contributor(browser, "owner")
+        outsider = contributor(browser, "outsider")
+        goal, task = proposal(browser, owner)
+        approved_task = browser.post(f"{PREFIX}/goals/{goal}/tasks", headers=owner, json=TASK).json()["id"]
+        approve(browser, "tasks", approved_task)
+        hide = {"action": "hide", "reason": "Removed"}
+        missing = browser.post(f"{PREFIX}/tasks/99999/claim", headers=outsider)
+        for kind, item, target in (("tasks", task, task), ("goals", goal, approved_task)):
+            assert browser.post(f"{PREFIX}/moderation/{kind}/{item}", headers=ADMIN, json=hide).status_code == 200
+            response = browser.post(f"{PREFIX}/tasks/{target}/claim", headers=outsider)
+            assert response.status_code == missing.status_code == 404
+            assert response.json() == missing.json()
+        for target in (goal, 99999):
+            response = browser.post(f"{PREFIX}/moderation/goals/{target}", headers=outsider, json=hide)
+            assert response.status_code == 404
+            assert response.json() == {"detail": "Content not found."}
+
+
+def test_limits_vote_age_locking_and_pagination(tmp_path):
+    clock = [1000]
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False, clock=lambda: clock[0], vote_age=60,
+                             signup_limit=3, write_limit=12)) as browser:
+        voter = password_account(browser, "voter")
+        token_only = contributor(browser, "worker")
+        assert browser.post(f"{PREFIX}/contributors", json={"handle": "admin"}).status_code == 409
+        assert browser.post(f"{PREFIX}/contributors", json={"handle": "additional"}).status_code == 429
+        goal, _ = proposal(browser, voter)
+        assert browser.post(f"{PREFIX}/goals/{goal}/vote", headers=voter).status_code == 403
+        clock[0] += 61
+        assert browser.post(f"{PREFIX}/goals/{goal}/vote", headers=token_only).status_code == 403
+        assert browser.post(f"{PREFIX}/goals/{goal}/vote", headers=voter).json()["votes"] == 1
+        assert browser.delete(f"{PREFIX}/goals/{goal}/vote", headers=voter).json()["votes"] == 0
+        assert browser.post(f"{PREFIX}/threads", headers=voter, content=b"a" * 65537).status_code == 413
+        ids = []
+        for title in ("A", "B"):
+            ids.append(browser.post(f"{PREFIX}/threads", headers=voter, json={"title": title, "body": "A replyable topic"}).json()["id"])
+        assert browser.get(f"{PREFIX}/threads?limit=1&page=2").json()[0]["id"] == ids[0]
+        assert browser.post(f"{PREFIX}/moderation/threads/{ids[0]}", headers=ADMIN, json={
+            "action": "lock", "reason": "Pause",
+        }).status_code == 200
+        assert browser.post(f"{PREFIX}/threads/{ids[0]}/comments", headers=voter, json={"body": "Reply"}).status_code == 409
+        calls = [browser.post(f"{PREFIX}/threads", headers=token_only, json={"title": "Post", "body": "Content"}).status_code
+                 for _ in range(12)]
+        assert 429 in calls
+        for _ in range(2):
+            assert browser.post(f"{PREFIX}/goals", json=GOAL, headers=voter).status_code == 201
+        assert browser.post(f"{PREFIX}/goals", json=GOAL, headers=voter).status_code == 429
+
+
+@pytest.mark.parametrize("trust_proxy", (False, True))
+def test_railway_rate_limits_use_edge_ip_only_when_configured(tmp_path, monkeypatch, trust_proxy):
+    monkeypatch.setenv("SWARM_TRUST_RAILWAY_CLIENT_IP", "1" if trust_proxy else "0")
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False, clock=lambda: 1000, signup_limit=1)) as browser:
+        def signup(handle, ip):
+            return browser.post(f"{PREFIX}/contributors", json={"handle": handle}, headers={"X-Real-IP": ip}).status_code
+
+        assert signup("first", "192.0.2.1") == 201
+        assert signup("second", "192.0.2.1") == 429
+        assert signup("third", "192.0.2.2") == (201 if trust_proxy else 429)
+        assert signup("fourth", "invalid") == (201 if trust_proxy else 429)
+        assert signup("fifth", "also-invalid") == 429
+
+
+def test_cors_headers_on_rejected_writes(tmp_path, monkeypatch):
+    origin = "http://localhost:5185"
+    monkeypatch.setenv("SWARM_CORS_ORIGINS", origin)
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False, clock=lambda: 1000, signup_limit=1)) as browser:
+        account = {"username": "reader", "password": "a unique passphrase"}
+        assert browser.post(f"{PREFIX}/auth/register", json=account).status_code == 201
+        headers = {"Origin": origin}
+        rate_limited = browser.post(f"{PREFIX}/auth/login", headers=headers, json=account)
+        too_large = browser.post(f"{PREFIX}/threads", headers=headers, content=b"a" * 65537)
+        csrf_rejected = browser.post("/propose", headers=headers, json=GOAL)
+        for response, status in ((rate_limited, 429), (too_large, 413), (csrf_rejected, 403)):
+            assert response.status_code == status
+            assert response.headers["Access-Control-Allow-Origin"] == origin
+        assert rate_limited.headers["Retry-After"] == "60"
+        denied = browser.post(f"{PREFIX}/auth/login", headers={"Origin": "https://unrelated.example"}, json=account)
+        assert denied.status_code == 429
+        assert "Access-Control-Allow-Origin" not in denied.headers
+
+
+@pytest.mark.parametrize("cors_config", ("explicit", "wildcard", "mixed"))
+def test_cookie_api_writes_require_an_exact_trusted_origin(tmp_path, monkeypatch, cors_config):
+    origin = "http://localhost:4185"
+    configured = {"explicit": origin, "wildcard": "*", "mixed": f"*,{origin}"}
+    monkeypatch.setenv("SWARM_CORS_ORIGINS", configured[cors_config])
+    monkeypatch.setenv("SWARM_PUBLIC_ORIGIN", "http://testserver")
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        author = contributor(browser, "writer")
+        goal, _ = proposal(browser, author)
+        assert browser.post(f"{PREFIX}/auth/register", json={
+            "username": "reader", "password": "a unique passphrase",
+        }).status_code == 201
+        url = f"{PREFIX}/goals/{goal}/vote"
+        for fetch_site in ("same-site", "cross-site"):
+            headers = {"Origin": origin, "Sec-Fetch-Site": fetch_site}
+            vote = browser.post(url, headers=headers)
+            unvote = browser.delete(url, headers=headers)
+            if cors_config == "explicit":
+                assert vote.status_code == 200 and vote.json()["viewer_voted"] is True
+                assert unvote.status_code == 200 and unvote.json()["viewer_voted"] is False
+                assert vote.headers["Access-Control-Allow-Origin"] == origin
+                assert vote.headers["Access-Control-Allow-Credentials"] == "true"
+            else:
+                assert vote.status_code == unvote.status_code == 403
+            assert browser.post(f"/vote/goals/{goal}", headers=headers).status_code == 403
+            unlisted = {"Origin": f"{origin}0", "Sec-Fetch-Site": fetch_site}
+            assert browser.post(url, headers=unlisted).status_code == 403
+        assert browser.post(url, headers={"Origin": "http://testserver"}).status_code == 200
+
+
+def test_goal_sharing_csrf_inline_forms_and_watch_scope(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        proposer = contributor(browser, "writer")
+        first, task = proposal(browser, proposer)
+        second, _ = proposal(browser, proposer)
+        assert browser.post(f"{PREFIX}/tasks/{task}/claim", headers=proposer).status_code == 200
+        assert browser.post(f"{PREFIX}/tasks/{task}/heartbeat", headers=proposer).status_code == 200
+        assert browser.get(f"{PREFIX}/stats?goal_id={first}").json()["agents_running"] == 1
+        assert browser.get(f"{PREFIX}/stats?goal_id={second}").json()["agents_running"] == 0
+        assert "Local install and contribution instructions" in browser.get(f"/goals/{second}").text
+        assert "sh install.sh ." in browser.get("/contribute").text
+        guest = browser.get(f"/goals/{first}")
+        assert "Sign in to vote" in guest.text and "Copy link" in guest.text
+        joined = browser.post("/join", data={"action": "register", "username": "reader",
+                                             "password": "safe unique passphrase", "next": f"/goals/{first}"},
+                              follow_redirects=False)
+        assert joined.status_code == 303 and joined.headers["location"] == f"/goals/{first}"
+        origin = {"Origin": "https://unrelated.example"}
+        assert browser.post(f"/vote/goals/{first}", headers=origin).status_code == 403
+        assert browser.post(f"/vote/goals/{first}").status_code == 200
+        assert "Voted · Remove" in browser.get(f"/goals/{first}").text
+        assert browser.post(f"/vote/goals/{first}?remove=true").status_code == 200
+        assert "Voted · Remove" not in browser.get(f"/goals/{first}").text
+        note = browser.post(f"/goals/{first}/notes", data={"body": "  "})
+        assert note.status_code == 422 and "Enter a note" in note.text and "<textarea" in note.text
+        discussion = browser.post("/forum", data={"title": "Draft stays", "body": "  "})
+        assert discussion.status_code == 422 and "Draft stays" in discussion.text
+        schema = browser.get("/openapi.json").json()
+        assert schema["components"]["securitySchemes"]["SwarmBearer"]["scheme"] == "bearer"
+        assert schema["paths"][f"{PREFIX}/goals"]["post"]["security"]
+        assert schema["paths"][f"{PREFIX}/goals/{{goal_id}}"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+        assert f"{PREFIX}/auth/github" not in schema["paths"]
+
+
+def test_login_error_keeps_the_username_at_sign_in(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=True)) as browser:
+        assert "not an invitation" in browser.get("/goals/1").text
+        assert "password of at least 12 characters" in browser.get("/join").text
+        password_account(browser, "reader")
+        response = browser.post("/join", data={"action": "login", "username": "reader",
+                                              "password": "wrong passphrase"})
+        assert response.status_code == 400
+        registration, sign_in = response.text.split("<h2>Sign in</h2>", 1)
+        assert 'role="alert"' not in registration
+        assert 'role="alert"' in sign_in
+        assert 'value="reader"' in sign_in
+        assert "autofocus" in sign_in
+        assert "wrong passphrase" not in response.text
+
+
+def test_claim_cap_release_and_stale_pr(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False, claim_cap=1, pr_checker=lambda *_: "invalid")) as browser:
+        owner = contributor(browser, "owner")
+        goal, first = proposal(browser, owner)
+        second = browser.post(f"{PREFIX}/goals/{goal}/tasks", json=TASK, headers=owner).json()["id"]
+        approve(browser, "tasks", second)
+        assert browser.post(f"{PREFIX}/tasks/{first}/claim", headers=owner).status_code == 200
+        assert browser.post(f"{PREFIX}/tasks/{second}/claim", headers=owner).status_code == 409
+        assert browser.post(f"{PREFIX}/tasks/{first}/submit", headers=owner,
+                            json={"pr_url": "https://github.com/example/docs/pull/1", "summary": "Old PR"}).status_code == 422
+        assert browser.post(f"{PREFIX}/tasks/{first}/release", headers=owner).json()["status"] == "open"
+        assert browser.post(f"{PREFIX}/tasks/{second}/claim", headers=owner).status_code == 200

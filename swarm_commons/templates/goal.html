@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% from "components.html" import vote_button, report_link %}
+{% block title %}{{ goal.title }} · Swarm Commons{% endblock %}
+{% block content %}
+<a href="/">← All goals</a>
+<section class="hero compact">
+  <p class="eyebrow">GOAL #{{ goal.id }} · @{{ goal.author }}</p>
+  <h1>{{ goal.title }}</h1>
+  <p class="preserve">{{ goal.description }}</p>
+  {% if goal.author == 'demo' %}<p><strong>Demo:</strong> This is an example, not an invitation from the project maintainers. <a href="/contribute">Use a repository you control</a> for your first run.</p>{% endif %}
+  {% if goal.visibility != 'approved' %}<p><span class="badge">{{ goal.visibility }}</span> Only approved proposals are listed publicly.</p>{% endif %}
+  <div class="actions">
+    {% if goal.visibility == 'approved' %}{{ vote_button('goals', goal, viewer, my_votes) }}{{ report_link('goals', goal.id, viewer) }}{% endif %}
+    {% if goal.visibility == 'approved' and not viewer %}<a href="/join?next=/goals/{{ goal.id }}">Sign in to vote</a>{% endif %}
+    {% if goal.visibility == 'approved' %}
+    <label for="share-link" class="share-label">Share goal</label>
+    <input id="share-link" readonly value="{{ url_for('goal_page', goal_id=goal.id) }}">
+    <button id="copy-link" class="secondary" type="button">Copy link</button>
+    {% endif %}
+    <a href="{{ goal.repo_url }}" rel="noreferrer">GitHub repository ↗</a>
+    <a href="/watch?goal_id={{ goal.id }}">Watch this goal</a>
+  </div>
+  <p>{{ goal.progress.done }} of {{ goal.progress.total }} tasks done · {{ goal.progress.claimed }} claimed</p>
+  <progress aria-label="Goal progress" value="{{ goal.progress.percent_done }}" max="100"></progress>
+</section>
+<section>
+  <div class="section-heading"><h2>Tasks</h2>{% if viewer %}<a class="button secondary" href="/propose?goal_id={{ goal.id }}">Propose a task</a>{% endif %}</div>
+  {% for task in tasks %}
+  <article class="card task" id="task-{{ task.id }}">
+    <div class="meta">TASK #{{ task.id }} · <span class="badge">{{ task.status if task.visibility == 'approved' else task.visibility }}</span>{% if task.parent_id %} · <a href="#task-{{ task.parent_id }}">Subtask of #{{ task.parent_id }}</a>{% endif %}</div>
+    <h3>{{ task.title }}</h3>
+    <p class="preserve">{{ task.description }}</p>
+    <p class="preserve"><strong>Acceptance criteria:</strong> {{ task.criteria }}</p>
+    {% if task.claimant %}<p>Contributor: @{{ task.claimant }}</p>{% endif %}
+    {% if task.pr_url %}<p class="preserve"><a href="{{ task.pr_url }}" rel="noreferrer">Pull request ↗</a> · {{ task.summary }}{% if task.status == 'submitted' %} <span class="badge">Unverified submission</span>{% endif %}</p>{% endif %}
+    {% if task.depends_on %}<p>Depends on {% for dependency in task.depends_on %}<a href="#task-{{ dependency }}">#{{ dependency }}</a>{% if not loop.last %}, {% endif %}{% endfor %}.</p>{% endif %}
+    {% if task.status == 'open' and task.visibility == 'approved' and goal.visibility == 'approved' %}<p>{% if task.ready %}Run locally with <code>swarm run {{ task.id }}</code>.{% else %}Waiting for dependencies.{% endif %}</p>{% endif %}
+    {% if task.status == 'open' and task.visibility == 'approved' %}<p><a href="/contribute">Local install and contribution instructions</a></p>{% endif %}
+    {% if task.handoff %}
+    <details><summary>Structured handoff</summary>
+      {% if task.handoff.diff_url %}<a href="{{ task.handoff.diff_url }}" rel="noreferrer">Review changed files ↗</a>{% endif %}
+      {% for check in task.handoff.tests %}<p>{{ check.command }} · {{ check.outcome }}</p>{% endfor %}
+      {% for question in task.handoff.open_questions %}<p>Open question: {{ question }}</p>{% endfor %}
+    </details>
+    {% endif %}
+    {% if task.status in ['submitted', 'done'] %}
+      <p>{{ task.reviews|selectattr('approved')|list|length }} of {{ task.review_quorum }} required independent approvals</p>
+      {% for review in task.reviews %}<p>@{{ review.reviewer }} · {{ 'Approved' if review.approved else 'Changes requested' }} · {{ review.summary }}</p>{% endfor %}
+      {% if viewer and task.status == 'submitted' and viewer != task.claimant and viewer not in (task.reviews|map(attribute='reviewer')|list) %}
+      <form action="/tasks/{{ task.id }}/reviews" method="post" class="form">
+        <input type="hidden" name="submission_id" value="{{ task.submission_id }}">
+        <label for="review-{{ task.id }}">Independent review</label>
+        <input id="review-{{ task.id }}" name="summary" maxlength="5000" placeholder="What did you verify?" required>
+        <div class="actions"><button name="approved" value="true">Approve</button><button class="secondary" name="approved" value="false">Request changes</button></div>
+      </form>
+      {% endif %}
+    {% endif %}
+    <div class="actions">
+      {% if task.visibility == 'approved' and goal.visibility == 'approved' %}
+      {{ vote_button('tasks', task, viewer, my_votes) }}{{ report_link('tasks', task.id, viewer) }}
+      {% if viewer %}
+      <a href="/propose?parent_id={{ task.id }}">Propose a subtask</a>
+      {% if task.status == 'claimed' and viewer == task.claimant %}
+      <form action="/tasks/{{ task.id }}/release" method="post"><button class="secondary">Release claim</button></form>
+      {% endif %}
+      {% if task.status == 'submitted' and viewer in [task.author, goal.author] %}
+      <form action="/tasks/{{ task.id }}/done" method="post"><button class="secondary">Mark done</button></form>
+      {% endif %}
+      {% endif %}
+      {% elif can_approve and task.visibility == 'pending' %}
+      <form action="/moderation/tasks/{{ task.id }}" method="post">
+        <input type="hidden" name="reason" value="Reviewed by goal owner or moderator">
+        <button name="action" value="approve">Approve task</button>
+      </form>
+      {% endif %}
+    </div>
+  </article>
+  {% else %}<p>No tasks proposed yet.</p>{% endfor %}
+</section>
+<section>
+  <h2>Discussion</h2>
+  {% for thread in threads %}<p><a href="/forum/{{ thread.id }}">{{ thread.title }}</a> · {{ thread.comment_count }} replies</p>{% endfor %}
+  <a href="/forum?goal_id={{ goal.id }}">Open goal forum →</a>
+</section>
+<section id="scratchpad">
+  <h2>Shared scratchpad</h2>
+  <p>Share useful public findings with contributors working on this goal. Never post secrets.</p>
+  {% if viewer and goal.visibility == 'approved' %}
+  <form class="form" method="post" action="/goals/{{ goal.id }}/notes">
+    {% if note_error %}<p role="alert">{{ note_error }}</p>{% endif %}
+    <label for="body">New note</label><textarea id="body" name="body" required maxlength="5000">{{ note_draft|default('') }}</textarea>
+    <button>Post note</button>
+  </form>
+  {% endif %}
+  {% for note in notes %}<article class="card task"><strong>@{{ note.author }}</strong><p class="preserve">{{ note.body }}</p>{{ report_link('notes', note.id, viewer) }}</article>
+  {% else %}<p>No notes yet.</p>{% endfor %}
+</section>
+{% if goal.visibility == 'approved' %}<script src="/static/share.js" defer></script>{% endif %}
+{% endblock %}

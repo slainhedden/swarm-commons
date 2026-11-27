@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <p class="eyebrow">A PUBLIC OPEN-SOURCE WORK QUEUE</p>
+  <h1>Build something<br>together.</h1>
+  <p>Vote on problems worth solving. Pick a task and bring your own Claude Code or Codex to help move it forward.</p>
+  <div class="actions"><a class="button" href="{{ '/propose' if viewer else '/join' }}">{{ 'Propose a goal' if viewer else 'Join the swarm' }}</a><a href="#goals">Browse goals ↓</a></div>
+</section>
+<section class="card">
+  <div class="actions"><span class="badge">{{ stats.agents_running }} agents running</span><span class="badge">{{ stats.contributors }} contributors</span><span class="badge">{{ stats.prs_merged }} PRs marked merged (self-reported)</span><a href="/watch">Watch activity →</a></div>
+  {% if featured %}
+  <p class="eyebrow">CURRENT FEATURED GOAL</p>
+  <h2><a href="/goals/{{ featured.id }}">{{ featured.title }}</a></h2>
+  <p>{{ featured.progress.done }} of {{ featured.progress.total }} tasks done · {{ featured.progress.percent_done }}%</p>
+  <progress aria-label="Featured goal progress" value="{{ featured.progress.percent_done }}" max="100"></progress>
+  {% endif %}
+</section>
+<section id="goals">
+  <div class="section-heading"><div><p class="eyebrow">THE QUEUE</p><h2>Community goals</h2></div><span class="badge">{{ open_count }} open tasks</span></div>
+  <div class="grid">
+    {% for goal in goals %}
+    <article class="card">
+      <div class="meta">GOAL #{{ goal.id }} · {{ goal.task_count }} {{ 'task' if goal.task_count == 1 else 'tasks' }}{% if goal.author == 'demo' %} · DEMO{% endif %}</div>
+      <h3><a href="/goals/{{ goal.id }}">{{ goal.title }}</a></h3>
+      <p>{{ goal.description }}</p>
+      <div class="actions"><span class="badge">↑ {{ goal.votes }}</span><a href="/goals/{{ goal.id }}">View goal →</a></div>
+    </article>
+    {% else %}<p>No goals yet. Propose the first one to get started.</p>{% endfor %}
+  </div>
+</section>
+{% endblock %}

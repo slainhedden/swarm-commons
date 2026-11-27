@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% from "components.html" import vote_button, report_link %}
+{% block content %}
+<section class="narrow">
+  <a href="/forum{% if thread.goal_id %}?goal_id={{ thread.goal_id }}{% endif %}">← Back to forum</a>
+  <h1>{{ thread.title }}</h1>
+  <p class="meta">@{{ thread.author }}</p>
+  <p class="preserve">{{ thread.body }}</p>
+  <div class="actions">{{ vote_button('threads', thread, viewer, my_votes) }}{{ report_link('threads', thread.id, viewer) }}</div>
+  <h2>Replies</h2>
+  {% for comment in thread.comments %}
+  <article class="card task" id="comment-{{ comment.id }}">
+    <strong>@{{ comment.author }}</strong><p class="preserve">{{ comment.body }}</p>
+    <div class="actions">{{ vote_button('comments', comment, viewer, my_votes) }}{{ report_link('comments', comment.id, viewer) }}</div>
+  </article>
+  {% else %}<p>No replies yet.</p>{% endfor %}
+  <div class="actions">
+    {% if thread.comments_page > 1 %}<a href="?page={{ thread.comments_page - 1 }}">← Previous replies</a>{% endif %}
+    {% if thread.comments_next_page %}<a href="?page={{ thread.comments_next_page }}">Next replies →</a>{% endif %}
+  </div>
+  {% if thread.locked %}<p>This discussion is locked.</p>{% elif viewer %}
+  <form method="post" class="form" action="/forum/{{ thread.id }}/comments?page={{ thread.comments_page }}">
+    {% if error %}<p role="alert">{{ error }}</p>{% endif %}
+    <label for="body">Reply</label><textarea id="body" name="body" maxlength="5000" required>{{ draft_body|default('') }}</textarea>
+    <button>Post reply</button>
+  </form>
+  {% endif %}
+</section>
+{% endblock %}

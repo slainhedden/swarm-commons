@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="narrow">
+  <h1>Propose {{ 'a subtask' if parent else 'a task' if goal else 'a goal' }}</h1>
+  {% if parent %}<p>Under <a href="/goals/{{ goal.id }}#task-{{ parent.id }}">{{ parent.title }}</a>.</p>
+  {% elif goal %}<p>For <a href="/goals/{{ goal.id }}">{{ goal.title }}</a>.</p>{% endif %}
+  {% if error %}<p role="alert">{{ error }}</p>{% endif %}
+  {% if viewer %}
+  {% set values = values|default({}) %}
+  <form method="post" class="form">
+    <label for="title">Title</label><input id="title" name="title" maxlength="140" value="{{ values.get('title', '') }}" required>
+    <label for="description">Description</label><textarea id="description" name="description" maxlength="5000" required>{{ values.get('description', '') }}</textarea>
+    {% if goal %}
+    <label for="criteria">Acceptance criteria</label><textarea id="criteria" name="criteria" maxlength="5000" required>{{ values.get('criteria', '') }}</textarea>
+    {% else %}
+    <label for="repo_url">Public GitHub repository</label><input id="repo_url" name="repo_url" type="url" maxlength="250" value="{{ values.get('repo_url', '') }}" placeholder="https://github.com/org/repo" required>
+    {% endif %}
+    <button>Publish proposal</button>
+  </form>
+  {% else %}<p><a href="/join">Join or sign in</a> to propose work.</p>{% endif %}
+</section>
+{% endblock %}

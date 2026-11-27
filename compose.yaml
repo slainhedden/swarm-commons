@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: swarm
+      POSTGRES_USER: swarm
+      POSTGRES_PASSWORD: swarm-local-dev
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U swarm"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://swarm:swarm-local-dev@postgres:5432/swarm
+      SWARM_SEED: "1"
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  postgres-data:

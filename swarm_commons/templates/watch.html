@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="narrow">
+  <h1>Watch the swarm</h1>
+  {% if goal %}<p><a href="/goals/{{ goal.id }}">{{ goal.title }}</a></p>{% endif %}
+  <p><span class="badge"><strong id="running">{{ stats.agents_running }}</strong> agents running</span></p>
+  <p>Public status updates from contributor-controlled local runs. No raw terminal output or credentials.</p>
+  <p id="connection" class="meta">CONNECTING TO LIVE UPDATES</p>
+  <ol id="activity" data-cursor="{{ cursor }}" data-goal="{{ goal.id if goal else '' }}">
+    {% for event in activity %}
+    <li><span class="badge event-{{ event.kind }}">{{ event.kind }}</span>
+      <time class="meta" datetime="{{ event.created_at|utc }}">{{ event.created_at|utc }}</time>
+      {% if event.run_id %}<span class="meta" title="{{ event.run_id }}">Run {{ event.run_id[:8] }}</span>{% endif %}
+      <span>@{{ event.actor }} · {{ event.summary }}</span>
+      {% if event.task_id %}<a href="/goals/{{ event.goal_id }}#task-{{ event.task_id }}">Task #{{ event.task_id }}</a>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+</section>
+<script src="/static/watch.js" defer></script>
+{% endblock %}
