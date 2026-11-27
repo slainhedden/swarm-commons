@@ -201,7 +201,7 @@ export async function updateStored<T>(
     return next;
   };
   if (typeof navigator !== "undefined" && navigator.locks) {
-    return navigator.locks.request(`swarm-notebook:${key}`, commit);
+    return navigator.locks.request(`swarm-notebook:${key}`, async () => commit());
   }
   return commit();
 }
