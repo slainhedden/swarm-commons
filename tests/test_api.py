@@ -121,11 +121,13 @@ def test_voting_progress_and_submission(app):
     assert browser.post(f"{PREFIX}/tasks/{task}/submit", headers=worker, json={
         **data, "pr_url": "https://github.com/another/project/pull/1",
     }).status_code == 422
-    assert browser.post(f"{PREFIX}/tasks/{task}/submit", headers=worker, json=data).json()["status"] == "submitted"
+    submitted = browser.post(f"{PREFIX}/tasks/{task}/submit", headers=worker, json=data).json()
+    assert submitted["status"] == "submitted"
     assert browser.post(f"{PREFIX}/tasks/{task}/done", headers=worker).status_code == 403
     assert browser.post(f"{PREFIX}/tasks/{task}/done", headers=author).status_code == 409
     assert browser.post(f"{PREFIX}/tasks/{task}/reviews", headers=author,
-                        json={"approved": True, "summary": "Independently checked the PR."}).status_code == 201
+                        json={"submission_id": submitted["submission_id"], "approved": True,
+                              "summary": "Independently checked the PR."}).status_code == 201
     assert browser.post(f"{PREFIX}/tasks/{task}/done", headers=author).json()["status"] == "done"
     assert browser.get(f"{PREFIX}/goals/{goal}/progress").json()["percent_done"] == 100
     assert browser.get(f"{PREFIX}/goals/featured").json()["id"] == first

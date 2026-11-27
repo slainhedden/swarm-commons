@@ -359,12 +359,18 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         FROM tasks t JOIN goals g ON g.id = t.goal_id
     """
 
+    def submission_id(db, task_id):
+        return db.execute("""
+            SELECT MAX(id) AS id FROM events WHERE task_id = ? AND kind = 'submitted'
+        """, (task_id,)).fetchone()["id"]
+
     def task_details(db, item, *, review=False):
         item["ready"] = bool(item["ready"])
         item["depends_on"] = [row["dependency_id"] for row in db.execute("""
             SELECT dependency_id FROM task_dependencies WHERE task_id = ? ORDER BY dependency_id
         """, (item["id"],))]
         if review:
+            item["submission_id"] = submission_id(db, item["id"]) if item["pr_url"] else None
             row = db.execute("SELECT data FROM handoffs WHERE task_id = ?", (item["id"],)).fetchone()
             item["handoff"] = json.loads(row["data"]) if row else None
             item["reviews"] = [
@@ -571,10 +577,11 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def done(task_id, handle):
         task(task_id)
         with connect(engine, write=True) as db:
+            suffix = " FOR UPDATE OF t" if db.connection.dialect.name == "postgresql" else ""
             item = require_row(db.execute("""
                 SELECT t.status, t.author, t.goal_id, g.author AS goal_author
                 FROM tasks t JOIN goals g ON g.id = t.goal_id WHERE t.id = ?
-            """, (task_id,)).fetchone(), "Task")
+            """ + suffix, (task_id,)).fetchone(), "Task")
             if handle not in {item["author"], item["goal_author"]}:
                 raise HTTPException(403, "Only the goal or task proposer can mark a result done.")
             if item["status"] != "submitted":
@@ -599,11 +606,14 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def review_task(task_id, data, handle):
         task(task_id)
         with connect(engine, write=True) as db:
-            item = require_row(db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone(), "Task")
+            suffix = " FOR UPDATE" if db.connection.dialect.name == "postgresql" else ""
+            item = require_row(db.execute("SELECT * FROM tasks WHERE id = ?" + suffix, (task_id,)).fetchone(), "Task")
             if item["status"] != "submitted":
                 raise HTTPException(409, "Only a submitted task can be reviewed.")
             if item["claimant"] == handle:
                 raise HTTPException(403, "Contributors cannot review their own result.")
+            if data.submission_id != submission_id(db, task_id):
+                raise HTTPException(409, "The submission changed. Reload the task before reviewing it.")
             saved = db.execute("""
                 INSERT INTO reviews VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING
             """, (task_id, handle, int(data.approved), data.summary, int(clock())))
@@ -1308,7 +1318,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         try:
             item = review_task(task_id, ReviewInput.model_validate(dict(await request.form())), handle)
         except ValidationError:
-            raise HTTPException(422, "Choose a verdict and enter a review note.") from None
+            raise HTTPException(422, "Reload the submission, then choose a verdict and enter a review note.") from None
         return redirect(f"/goals/{item['goal_id']}#task-{task_id}")
 
     @app.get("/forum")

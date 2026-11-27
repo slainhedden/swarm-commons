@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pytest
 from fastapi.testclient import TestClient
-from support import approve, test_app
+from support import ADMIN, approve, test_app
 
 from swarm_commons import guards, verification
 from swarm_commons.client import SwarmError, SwarmUnavailable
@@ -37,7 +37,8 @@ def test_dependencies_handoff_and_quorum(tmp_path):
         }}
         submitted = browser.post(f"{PREFIX}/tasks/{first}/submit", headers=builder, json=submission).json()
         assert submitted["handoff"]["open_questions"] == ["Cover Windows?"]
-        review = {"approved": True, "summary": "Confirmed against the PR."}
+        review = {"approved": True, "summary": "Confirmed against the PR.",
+                  "submission_id": submitted.get("submission_id")}
         route = f"{PREFIX}/tasks/{first}/reviews"
         assert browser.post(route, headers=builder, json=review).status_code == 403
         assert browser.post(route, headers=reviewer, json=review).status_code == 201
@@ -51,11 +52,33 @@ def test_dependencies_handoff_and_quorum(tmp_path):
         submission["pr_url"] = "https://github.com/example/docs/pull/3"
         submission["handoff"]["diff_url"] = submission["pr_url"] + "/files"
         submission["handoff"]["tests"][0]["outcome"] = "failed"
-        assert browser.post(f"{PREFIX}/tasks/{second['id']}/submit", headers=builder, json=submission).status_code == 200
+        replacement = browser.post(f"{PREFIX}/tasks/{second['id']}/submit", headers=builder, json=submission)
+        assert replacement.status_code == 200
+        review["submission_id"] = replacement.json().get("submission_id")
         for identity in (reviewer, author):
             assert browser.post(f"{PREFIX}/tasks/{second['id']}/reviews", headers=identity, json=review).status_code == 201
         assert "successful test results" in browser.post(f"{PREFIX}/tasks/{second['id']}/done", headers=author).text
         assert another_task != first
+
+
+def test_review_rejects_a_previous_submission_even_for_the_same_pr(tmp_path):
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False, clock=lambda: 1000)) as browser:
+        author = contributor(browser, "author")
+        builder = contributor(browser, "builder")
+        _, task = proposal(browser, author)
+        route = f"{PREFIX}/tasks/{task}"
+        submission = {"pr_url": "https://github.com/example/docs/pull/2", "summary": "Ready"}
+        assert browser.post(f"{route}/claim", headers=builder).status_code == 200
+        original = browser.post(f"{route}/submit", headers=builder, json=submission).json()
+        assert browser.post(f"{PREFIX}/moderation/tasks/{task}", headers=ADMIN,
+                            json={"action": "reject_submission", "reason": "Needs more evidence"}).status_code == 200
+        assert browser.post(f"{route}/claim", headers=builder).status_code == 200
+        current = browser.post(f"{route}/submit", headers=builder, json=submission).json()
+        review = {"approved": True, "summary": "Reviewed", "submission_id": original.get("submission_id")}
+        assert browser.post(f"{route}/reviews", headers=author, json=review).status_code == 409
+        assert browser.get(route).json()["reviews"] == []
+        review["submission_id"] = current["submission_id"]
+        assert browser.post(f"{route}/reviews", headers=author, json=review).status_code == 201
 
 
 def test_path_reservations_span_goals_and_expire(tmp_path):

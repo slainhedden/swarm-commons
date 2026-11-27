@@ -25,6 +25,7 @@ class Handoff(BaseModel):
 
 
 class ReviewInput(BaseModel):
+    submission_id: int = Field(gt=0)
     approved: bool
     summary: Text
 
