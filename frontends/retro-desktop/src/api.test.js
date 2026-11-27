@@ -162,6 +162,27 @@ test("write requests support JSON and vote removal without implicit browser cook
   });
 });
 
+test("older discussion pages retain goal and account scope", async () => {
+  const paths = [];
+  const older = { id: 1, title: "An older discussion", body: "Still reachable" };
+  const result = await fetchPublicWorkspace("https://platform.example/api/v1", {
+    token: "test-session",
+    goalId: 4,
+    threadPage: 2,
+    fetcher: async (url, options) => {
+      assert.equal(options.headers.Authorization, "Bearer test-session");
+      const { pathname, search } = new URL(url);
+      paths.push(pathname + search);
+      const data = pathname.endsWith("/stats")
+        ? { agents_running: 1, contributors: 3, prs_merged: 0 }
+        : pathname.endsWith("/threads") ? [older] : [];
+      return { ok: true, json: async () => data };
+    },
+  });
+  assert.ok(paths.includes("/api/v1/threads?goal_id=4&page=2&limit=20"));
+  assert.deepEqual(result.threads, [older]);
+});
+
 test("API error codes preserve backend detail and retry guidance", async () => {
   for (const status of [401, 403, 409, 413, 429]) {
     await assert.rejects(

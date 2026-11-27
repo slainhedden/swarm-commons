@@ -104,6 +104,7 @@ export default function PlatformBrowser({ onDemo, notify }) {
   const [query, setQuery] = useState("");
   const [form, setForm] = useState(null);
   const [threadId, setThreadId] = useState(null);
+  const [threadPage, setThreadPage] = useState(1);
   const [thread, setThread] = useState(null);
   const [threadError, setThreadError] = useState("");
   const [queue, setQueue] = useState(null);
@@ -166,7 +167,12 @@ export default function PlatformBrowser({ onDemo, notify }) {
     const timeout = setTimeout(() => controller.abort(), 12000);
     setLoading(true);
     setError("");
-    fetchPublicWorkspace(API_BASE, { token, goalId, signal: controller.signal })
+    fetchPublicWorkspace(API_BASE, {
+      token,
+      goalId,
+      threadPage,
+      signal: controller.signal,
+    })
       .then((value) => {
         if (active) {
           setWorkspace(value);
@@ -192,7 +198,7 @@ export default function PlatformBrowser({ onDemo, notify }) {
       clearTimeout(timeout);
       controller.abort();
     };
-  }, [revision, token, goalId]);
+  }, [revision, token, goalId, threadPage]);
   useEffect(() => {
     if (!goalId) {
       setTasks(null);
@@ -391,6 +397,7 @@ export default function PlatformBrowser({ onDemo, notify }) {
       return;
     }
     setGoalId(id);
+    setThreadPage(1);
     setTasks(null);
     setThreadId(null);
     setForm(null);
@@ -1006,13 +1013,15 @@ export default function PlatformBrowser({ onDemo, notify }) {
                   busy={busy}
                   onCancel={() => setForm(null)}
                   fields={[titleField, bodyField]}
-                  onSubmit={(data) =>
-                    finishForm(
+                  onSubmit={async (data) => {
+                    const saved = await finishForm(
                       "/threads",
                       { ...data, ...(goalId ? { goal_id: goalId } : {}) },
                       { message: "Discussion posted to the shared platform." },
-                    )
-                  }
+                    );
+                    if (saved) setThreadPage(1);
+                    return saved;
+                  }}
                 />
               )}
               {workspace.threads.map((t) => (
@@ -1046,7 +1055,36 @@ export default function PlatformBrowser({ onDemo, notify }) {
                   </div>
                 </article>
               ))}
-              {!workspace.threads.length && <p>No conversations yet.</p>}
+              {!workspace.threads.length && (
+                <p>
+                  {threadPage === 1
+                    ? "No conversations yet."
+                    : "No more conversations on this page."}
+                </p>
+              )}
+              <nav className="platform-actions" aria-label="Discussion pages">
+                <button
+                  className="retro-button"
+                  disabled={loading || threadPage === 1}
+                  onClick={() => {
+                    setThreadPage((page) => page - 1);
+                    setThreadId(null);
+                  }}
+                >
+                  Newer discussions
+                </button>
+                <span aria-live="polite">Page {threadPage}</span>
+                <button
+                  className="retro-button"
+                  disabled={loading || workspace.threads.length < 20}
+                  onClick={() => {
+                    setThreadPage((page) => page + 1);
+                    setThreadId(null);
+                  }}
+                >
+                  Older discussions
+                </button>
+              </nav>
             </section>
             <section>
               <h3>Recent platform activity</h3>

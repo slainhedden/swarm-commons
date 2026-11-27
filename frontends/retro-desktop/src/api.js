@@ -149,6 +149,7 @@ export async function fetchJson(
 }
 
 export async function fetchPublicWorkspace(base, options) {
+  const threadPage = options?.threadPage ?? 1;
   const [goals, stats, threads, activity] = await Promise.all([
     fetchJson(base, "/goals", options),
     fetchJson(
@@ -159,8 +160,8 @@ export async function fetchPublicWorkspace(base, options) {
     fetchJson(
       base,
       options?.goalId
-        ? `/threads?goal_id=${options.goalId}&page=1&limit=20`
-        : "/threads?page=1&limit=20",
+        ? `/threads?goal_id=${options.goalId}&page=${threadPage}&limit=20`
+        : `/threads?page=${threadPage}&limit=20`,
       options,
     ),
     fetchJson(base, "/activity?limit=12", options),
