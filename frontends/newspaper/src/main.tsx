@@ -89,8 +89,9 @@ function App(){
   if(!live)return;
   const controller=new AbortController();
   const pageSize=20;
-  const update=async()=>{
-   setThreadsLoading(true);setThreadsError('');
+  const update=async(foreground=false)=>{
+   if(foreground)setThreadsLoading(true);
+   setThreadsError('');
    try{
     const goalFilter=discussionGoal?'&goal_id='+encodeURIComponent(discussionGoal.id):'';
     // With limit=1, page=offset+1 probes the next item without skipping a dispatch.
@@ -103,9 +104,9 @@ function App(){
     setHasMoreThreads(nextThread.length>0);
    }catch(error){
     if(!controller.signal.aborted&&!recoverSession(error))setThreadsError((error as Error).message);
-   }finally{if(!controller.signal.aborted)setThreadsLoading(false);}
+   }finally{if(foreground&&!controller.signal.aborted)setThreadsLoading(false);}
   };
-  update();const interval=setInterval(update,30000);
+  update(true);const interval=setInterval(update,30000);
   return()=>{controller.abort();clearInterval(interval);};
  },[live,session?.token,threadPage,threadRevision,discussionGoal?.id]);
  function discussGoal(goal:Goal){
