@@ -31,7 +31,7 @@ def approve(browser, kind, item):
         db.execute("""
             INSERT INTO contributors (handle, role) VALUES ('test-admin', 'admin') ON CONFLICT DO NOTHING
         """)
-        db.execute("INSERT INTO sessions VALUES (?, 'test-admin', NULL) ON CONFLICT DO NOTHING",
+        db.execute("INSERT INTO sessions (token_hash, handle) VALUES (?, 'test-admin') ON CONFLICT DO NOTHING",
                    (token_hash(TEST_ADMIN_TOKEN),))
     engine.dispose()
     response = browser.post(f"/api/v1/moderation/{kind}/{item}", headers=ADMIN,

@@ -6,7 +6,7 @@ from .client import SwarmError
 from .local import safe_env
 
 
-def verify(workspace, image, test_command):
+def verify(workspace, image, test_command, *, git_dir=None):
     if not image or not test_command:
         return [{"command": "Project test command was not configured", "outcome": "not_run"}]
     try:
@@ -16,12 +16,18 @@ def verify(workspace, image, test_command):
     if not words or not image[0].isalnum():
         raise SwarmError("Use a trusted local Docker image and a nonempty test command.")
     name = "swarm-verify-" + uuid.uuid4().hex
+    git_mount = [
+        "--mount", f"type=bind,source={git_dir},target={git_dir},readonly",
+        "--env", "GIT_CONFIG_COUNT=1", "--env", "GIT_CONFIG_KEY_0=safe.directory",
+        "--env", "GIT_CONFIG_VALUE_0=/workspace",
+    ] if git_dir is not None else []
     command = [
         "docker", "run", "--rm", "--pull=never", "--network=none", "--cap-drop=ALL",
         "--name", name,
         "--security-opt=no-new-privileges", "--read-only", "--pids-limit=256", "--memory=1g", "--cpus=2",
         "--user=65534:65534", "--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777",
         "--mount", f"type=bind,source={workspace},target=/workspace,readonly", "--workdir", "/workspace",
+        *git_mount,
         "--entrypoint", words[0], image, *words[1:],
     ]
     try:
