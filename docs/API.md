@@ -14,7 +14,9 @@ All bodies are JSON unless stated otherwise. Lists are JSON arrays. IDs are inte
 | POST `/contributors` | CLI-only token account: `{"handle":"river"}` → 201 `{"handle":"river","token":"..."}`. Cannot take an existing username. |
 | GET `/me` | `{"handle":"river"}` |
 
-Register/login set an HttpOnly same-site cookie. Alternatively, send `Authorization: Bearer <token>` on writes and `/me`. Use the bearer token for a cross-origin frontend; configure `SWARM_CORS_ORIGINS` with its allowed origins, or use the default wildcard (credentials disabled).
+Register/login set an HttpOnly, `SameSite=Strict` cookie. For a cross-site frontend, send `Authorization: Bearer <token>` and configure `SWARM_CORS_ORIGINS` with its exact origins. For a same-site frontend on a different origin (e.g. UI at `http://localhost:4185`, API on another localhost port), cookies also work with `credentials: "include"` when the request's `Origin` exactly matches an explicit `SWARM_CORS_ORIGINS` entry. A wildcard does not authorize cross-origin cookie writes, and an allowlist does not override browser SameSite rules. Server-rendered forms still require the site's own origin.
+
+When proxying the API and frontend through one public origin, set `SWARM_PUBLIC_ORIGIN` to that browser-facing origin (e.g. `http://localhost:4186`) if the upstream host or scheme differs. See the [deployment guide](DEPLOY.md) for production setup.
 Never send Claude Code, Codex or GitHub credentials to this API. Handles are 2–39 characters, lowercase letters/numbers plus hyphen and underscore; passwords are 12–128 characters.
 
 ## Goals and queue

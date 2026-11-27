@@ -248,7 +248,7 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
 
     def authenticate_request(request: Request, _=Depends(bearer_scheme)):
         if request.method != "GET" and bearer_token(request) is None:
-            web_origin(request)
+            web_origin(request, allow_cors_origin=True)
         return contributor(request)
 
     auth = Depends(authenticate_request)
@@ -305,9 +305,10 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
         return await call_next(request)
 
     origins = [item.strip() for item in os.environ.get("SWARM_CORS_ORIGINS", "*").split(",") if item.strip()]
+    cors_credentials = bool(origins and "*" not in origins)
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["GET", "POST", "DELETE"],
                        allow_headers=["Authorization", "Content-Type", "Last-Event-ID"],
-                       allow_credentials=bool(origins and "*" not in origins))
+                       allow_credentials=cors_credentials)
 
     def progress(db, goal_id):
         counts = dict.fromkeys(("open", "claimed", "submitted", "done"), 0)
@@ -1186,10 +1187,13 @@ def create_app(db_path=None, *, seed=None, clock=time.time, lease_seconds=3600, 
     def redirect(url):
         return RedirectResponse(url, status_code=303)
 
-    def web_origin(request):
+    def web_origin(request, *, allow_cors_origin=False):
+        origin = request.headers.get("origin")
+        if allow_cors_origin and cors_credentials and origin != "null" and origin in origins:
+            return
         if request.headers.get("sec-fetch-site") == "cross-site":
             raise HTTPException(403, "Cross-site form submissions are not allowed.")
-        source = request.headers.get("origin") or request.headers.get("referer")
+        source = origin or request.headers.get("referer")
         if source:
             try:
                 incoming = urlsplit(source)

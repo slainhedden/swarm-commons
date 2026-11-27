@@ -95,7 +95,7 @@ def test_cors_headers_on_rejected_writes(tmp_path, monkeypatch):
         headers = {"Origin": origin}
         rate_limited = browser.post(f"{PREFIX}/auth/login", headers=headers, json=account)
         too_large = browser.post(f"{PREFIX}/threads", headers=headers, content=b"a" * 65537)
-        csrf_rejected = browser.post(f"{PREFIX}/goals", headers=headers, json=GOAL)
+        csrf_rejected = browser.post("/propose", headers=headers, json=GOAL)
         for response, status in ((rate_limited, 429), (too_large, 413), (csrf_rejected, 403)):
             assert response.status_code == status
             assert response.headers["Access-Control-Allow-Origin"] == origin
@@ -103,6 +103,36 @@ def test_cors_headers_on_rejected_writes(tmp_path, monkeypatch):
         denied = browser.post(f"{PREFIX}/auth/login", headers={"Origin": "https://unrelated.example"}, json=account)
         assert denied.status_code == 429
         assert "Access-Control-Allow-Origin" not in denied.headers
+
+
+@pytest.mark.parametrize("cors_config", ("explicit", "wildcard", "mixed"))
+def test_cookie_api_writes_require_an_exact_trusted_origin(tmp_path, monkeypatch, cors_config):
+    origin = "http://localhost:4185"
+    configured = {"explicit": origin, "wildcard": "*", "mixed": f"*,{origin}"}
+    monkeypatch.setenv("SWARM_CORS_ORIGINS", configured[cors_config])
+    monkeypatch.setenv("SWARM_PUBLIC_ORIGIN", "http://testserver")
+    with TestClient(test_app(tmp_path / "db.sqlite3", seed=False)) as browser:
+        author = contributor(browser, "writer")
+        goal, _ = proposal(browser, author)
+        assert browser.post(f"{PREFIX}/auth/register", json={
+            "username": "reader", "password": "a unique passphrase",
+        }).status_code == 201
+        url = f"{PREFIX}/goals/{goal}/vote"
+        for fetch_site in ("same-site", "cross-site"):
+            headers = {"Origin": origin, "Sec-Fetch-Site": fetch_site}
+            vote = browser.post(url, headers=headers)
+            unvote = browser.delete(url, headers=headers)
+            if cors_config == "explicit":
+                assert vote.status_code == 200 and vote.json()["viewer_voted"] is True
+                assert unvote.status_code == 200 and unvote.json()["viewer_voted"] is False
+                assert vote.headers["Access-Control-Allow-Origin"] == origin
+                assert vote.headers["Access-Control-Allow-Credentials"] == "true"
+            else:
+                assert vote.status_code == unvote.status_code == 403
+            assert browser.post(f"/vote/goals/{goal}", headers=headers).status_code == 403
+            unlisted = {"Origin": f"{origin}0", "Sec-Fetch-Site": fetch_site}
+            assert browser.post(url, headers=unlisted).status_code == 403
+        assert browser.post(url, headers={"Origin": "http://testserver"}).status_code == 200
 
 
 def test_goal_sharing_csrf_inline_forms_and_watch_scope(tmp_path):
